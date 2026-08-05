@@ -206,6 +206,8 @@ The code and infra are ready; these need your accounts:
 - **DB backup** — `deploy/backup.sh` runs weekly (Sun 03:15 UTC), keeps 4 local
   snapshots, and uploads one to `OCI_BACKUP_BUCKET` if set.
 - **Heartbeat** — `TED_HEARTBEAT_URL` is pinged with `?notices=&alerts=` after each run.
+- **FQDN + TLS** *(only if you expose a service)* — [`docs/dns-tls.md`](docs/dns-tls.md):
+  free DuckDNS hostname + Let's Encrypt cert via DNS-01 (no inbound ports).
 
 ## Command reference
 
