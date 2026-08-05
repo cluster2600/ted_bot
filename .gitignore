@@ -6,3 +6,14 @@ ted.db-wal
 ted.db-shm
 .env
 ted_scanner.log
+
+# Terraform (state holds secrets; tfvars holds credentials)
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+terraform/terraform.tfvars
+*.tfplan
+
+# seeded watchlist may hold your private target list
+deploy/whitelist.sql

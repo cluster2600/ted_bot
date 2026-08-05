@@ -1,0 +1,20 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+
+# --- OCI API auth ---
+tenancy_ocid     = "ocid1.tenancy.oc1..aaaa..."
+user_ocid        = "ocid1.user.oc1..aaaa..."
+fingerprint      = "aa:bb:cc:dd:ee:ff:..."
+private_key_path = "~/.oci/oci_api_key.pem"
+region           = "eu-zurich-1"
+compartment_ocid = "ocid1.compartment.oc1..aaaa..."   # or the tenancy_ocid for root
+
+# --- Access ---
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+ssh_ingress_cidr    = "1.2.3.4/32"                     # your IP; keep it tight
+
+# --- App ---
+git_repo_slug      = "cluster2600/ted_bot"
+github_token       = "github_pat_..."                  # only if the repo is private
+telegram_bot_token = "123456:ABC-your-token"
+telegram_chat_id   = "987654321"
+anthropic_api_key  = "sk-ant-..."                      # optional
