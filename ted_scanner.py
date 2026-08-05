@@ -687,6 +687,8 @@ def main(argv=None) -> int:
     p.add_argument("--init-db", action="store_true", help="create tables and exit")
     p.add_argument("--dry-run", action="store_true", help="scan without sending/recording")
     p.add_argument("--dump", type=int, metavar="N", help="print N raw notices and exit")
+    p.add_argument("--test-telegram", action="store_true",
+                   help="send a canned message to verify Telegram wiring")
     p.add_argument("--selftest", action="store_true", help="run offline logic check")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
@@ -701,6 +703,12 @@ def main(argv=None) -> int:
         init_db(); return 0
     if args.dump:
         dump_notices(args.dump); return 0
+    if args.test_telegram:
+        ok = send_telegram_alert(
+            "\U0001F6E0 <b>ted_bot</b> — Telegram wiring OK. You'll get award "
+            "alerts here at 07:45 UTC.", http_session())
+        print("telegram: sent ✔" if ok else "telegram: FAILED (check token/chat_id, see log)")
+        return 0 if ok else 1
     try:
         scan(dry_run=args.dry_run)
         return 0

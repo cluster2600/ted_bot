@@ -186,13 +186,19 @@ ANTHROPIC_API_KEY=sk-ant-...
 The code and infra are ready; these need your accounts:
 
 1. **Telegram bot** — create one with [@BotFather](https://t.me/BotFather), copy the
-   token, send your bot a message, then find your chat id:
+   token, send your bot a message, then find your chat id, and verify delivery:
    ```bash
    TELEGRAM_BOT_TOKEN=123:ABC ./deploy/get_chat_id.sh
+   TELEGRAM_BOT_TOKEN=123:ABC TELEGRAM_CHAT_ID=987 python3 ted_scanner.py --test-telegram
    ```
-2. **Whitelist** — copy `deploy/whitelist.example.sql` to `deploy/whitelist.sql`,
-   replace the samples with your real small-cap universe, and commit it (cloud-init
-   auto-seeds it). Accuracy of `annual_revenue_eur` drives materiality.
+2. **Whitelist** — the fast path is to seed from tickers (pulls name/ISIN/revenue/
+   market-cap via yfinance, normalising names to match TED text):
+   ```bash
+   python3 deploy/seed_from_tickers.py EXA.PA THEON.AS SWP.PA > deploy/whitelist.sql
+   ```
+   Review it (yfinance figures are in the stock's reporting currency; materiality
+   assumes EUR), then commit `deploy/whitelist.sql` — cloud-init auto-seeds it.
+   `annual_revenue_eur` accuracy drives materiality.
 3. **OCI API key** — Console → *My profile → API keys → Add API key*; feed the
    values into `terraform/terraform.tfvars` (see `terraform/README.md`).
 4. **`ANTHROPIC_API_KEY`** *(optional)* — for the Haiku adapter.
