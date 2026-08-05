@@ -15,6 +15,7 @@ Usage:
 
 Env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID  (required to send)
      ANTHROPIC_API_KEY (optional — enables the Haiku adapt-in-the-loop layer)
+     TED_HEARTBEAT_URL (optional — dead-man's-switch ping after each run)
      TED_DB (default ./ted.db), TED_LOOKBACK_DAYS (default 1)
 """
 from __future__ import annotations
@@ -55,23 +56,25 @@ DB_PATH = os.environ.get("TED_DB", os.path.join(HERE, "ted.db"))
 SCHEMA_PATH = os.path.join(HERE, "schema.sql")
 
 TED_SEARCH_URL = "https://api.ted.europa.eu/v3/notices/search"
-TED_DETAIL_URL = "https://ted.europa.eu/en/notice/-/detail/{pub}"
+TED_DETAIL_URL = "https://ted.europa.eu/en/notice/{pub}"
 
 # High-alpha CPV divisions (matched by prefix on the notice CPV codes).
 CPV_CODES = ["72000000", "35000000", "33000000", "09330000"]
 NOTICE_TYPES = ["can-standard", "can-social"]           # Contract Award Notices
 LOOKBACK_DAYS = int(os.environ.get("TED_LOOKBACK_DAYS", "1"))
 
-# ponytail: TED eForms field names drift between API revisions. This is a best
-# effort request set; if the API 400s we retry without it and fall back to the
-# deep-search heuristic below. Use --dump to discover the current names.
+# Validated against the live TED v3 vocabulary (1830 eForms business terms).
+# `fields` is REQUIRED and non-empty; on drift we retry with _MINIMAL_FIELDS.
+# Run --dump to re-inspect the live shape if TED renames anything.
 REQUEST_FIELDS = [
-    "publication-number", "notice-title", "publication-date",
-    "classification-cpv", "notice-type",
-    "winner-name", "organisation-name-win", "winner-country",
-    "awarded-value", "awarded-value-cur", "tender-value",
-    "buyer-name",
+    "publication-number", "notice-title", "notice-type", "publication-date",
+    "classification-cpv", "winner-name", "winner-country",
+    "result-value-notice", "result-value-cur-notice",
+    "result-value-lot", "result-value-cur-lot",
+    "tender-value", "tender-value-cur",
 ]
+_MINIMAL_FIELDS = ["publication-number", "notice-type", "winner-name",
+                   "result-value-notice", "result-value-cur-notice"]
 
 MATERIALITY_THRESHOLD = 0.15           # contract EUR / annual revenue EUR
 MARKET_CAP_MIN = 100_000_000           # EUR
@@ -92,6 +95,7 @@ _LEGAL_SUFFIXES = (
     "spa", "srl", "sarl", "sas", "sa", "ag", "gmbh", "plc", "ltd", "limited",
     "bv", "nv", "oyj", "oy", "ab", "as", "aps", "kft", "sp", "zoo", "sl",
     "se", "inc", "llc", "co", "corp", "group", "holding", "holdings",
+    "uab", "sia", "ou", "doo", "dd", "ead", "ood", "sro",   # Baltic / CEE forms
 )
 
 
@@ -226,35 +230,91 @@ def _num(x):
         return None
 
 
-def extract_notice(notice: dict) -> dict:
-    """Pull id, winners, contract value and currency from a notice, resiliently.
+def _flatten_strings(v):
+    """Yield string leaves from a str / list / language-keyed dict TED value."""
+    if isinstance(v, str):
+        if v:
+            yield v
+    elif isinstance(v, list):
+        for x in v:
+            yield from _flatten_strings(x)
+    elif isinstance(v, dict):
+        for x in v.values():
+            yield from _flatten_strings(x)
 
-    ponytail: heuristic key-name search rather than fixed paths, so it survives
-    TED field renames. Upgrade to a strict mapping once field names stabilise.
+
+def _first_number(v):
+    """Largest positive number anywhere inside a str/list/dict value, else None."""
+    nums = [n for n in (_num(s) for s in _flatten_strings(v)) if n and n > 0]
+    return max(nums) if nums else None
+
+
+def _pick_lang(v, prefer="eng"):
+    """Collapse a {lang: text} field (or plain string) to one display string."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, dict) and v:
+        return v.get(prefer) or next(iter(v.values()))
+    return ""
+
+
+def _deep_extract(notice: dict) -> tuple[list[str], float | None, str | None]:
+    """Heuristic fallback used only when the explicit fields come up empty.
+
+    ponytail: key-name search over the flattened notice, so a future TED rename
+    still yields *something*. The schema-aware path in extract_notice is primary.
     """
-    winners, values, currencies, pub = [], [], [], None
+    winners, values, currencies = [], [], []
     for path, val in _leaves(notice):
         if val in (None, ""):
             continue
         key = path.lower()
-        if pub is None and ("publication-number" in key or key.endswith(".nd") or key == "nd"):
-            pub = str(val)
-        if "winner" in key or ("organisation" in key and "name" in key):
-            if isinstance(val, str) and len(val) > 1:
-                winners.append(val)
-        if ("value" in key or "amount" in key) and "cur" not in key:
+        if ("winner-name" in key or "name-tenderer" in key) and isinstance(val, str):
+            winners.append(val)
+        elif ("value" in key or "amount" in key) and "cur" not in key:
             n = _num(val)
             if n and n > 0:
                 values.append(n)
-        if "cur" in key and isinstance(val, str) and re.fullmatch(r"[A-Za-z]{3}", val):
+        elif "cur" in key and isinstance(val, str) and re.fullmatch(r"[A-Za-z]{3}", val):
             currencies.append(val.upper())
+    return (list(dict.fromkeys(winners)),
+            max(values) if values else None,
+            currencies[0] if currencies else None)
+
+
+def extract_notice(notice: dict) -> dict:
+    """Pull id, winners, awarded value and currency from a TED CAN notice.
+
+    Schema-aware for the requested eForms fields; falls back to _deep_extract
+    (and, upstream in scan(), the LLM) when the schema drifts.
+    """
+    pub = notice.get("publication-number") or notice.get("ND")
+    winners = list(dict.fromkeys(
+        list(_flatten_strings(notice.get("winner-name")))
+        or list(_flatten_strings(notice.get("organisation-name-tenderer")))))
+    # ponytail: notice-level total preferred; on a multi-lot notice this attributes
+    # the whole notice value to a single winner (over-alerts, never under). Per-lot
+    # winner->value linkage would need the lot-result graph — upgrade if too noisy.
+    value = (_first_number(notice.get("result-value-notice"))
+             or _first_number(notice.get("result-value-lot"))
+             or _first_number(notice.get("tender-value")))
+    currency = next(iter(
+        list(_flatten_strings(notice.get("result-value-cur-notice")))
+        or list(_flatten_strings(notice.get("result-value-cur-lot")))
+        or list(_flatten_strings(notice.get("tender-value-cur")))), None)
+
+    if not winners or value is None:            # explicit fields empty -> heuristic
+        w2, v2, c2 = _deep_extract(notice)
+        winners = winners or w2
+        if value is None:
+            value, currency = v2, (currency or c2)
 
     return {
-        "notice_id": pub or notice.get("publication-number") or json.dumps(notice, sort_keys=True)[:64],
-        "winners": list(dict.fromkeys(winners)),          # de-dup, keep order
-        "value": max(values) if values else None,          # take the headline lot value
-        "currency": currencies[0] if currencies else "EUR",
-        "title": notice.get("notice-title") or notice.get("TI") or "",
+        "notice_id": str(pub) if pub else json.dumps(notice, sort_keys=True)[:64],
+        "winners": winners,
+        "value": value,
+        "currency": (currency or "EUR").upper(),
+        "title": _pick_lang(notice.get("notice-title")),
     }
 
 
@@ -303,8 +363,12 @@ def fetch_notices(session: requests.Session) -> list[dict]:
 
 
 def _post_with_fallback(session, body):
-    """POST the search; on 4xx retry without the (fragile) fields list."""
-    for attempt_body in (body, {k: v for k, v in body.items() if k != "fields"}):
+    """POST the search; on 4xx retry with a minimal known-good field set.
+
+    TED requires a non-empty `fields` from a controlled vocabulary, so the
+    fallback swaps in fewer fields rather than dropping the parameter.
+    """
+    for attempt_body in (body, {**body, "fields": _MINIMAL_FIELDS}):
         try:
             r = session.post(TED_SEARCH_URL, json=attempt_body, timeout=60)
         except requests.RequestException as e:
@@ -316,8 +380,8 @@ def _post_with_fallback(session, body):
             except ValueError:
                 log.error("TED returned non-JSON body (%d bytes)", len(r.content))
                 return None
-        if 400 <= r.status_code < 500 and "fields" in attempt_body:
-            log.warning("TED %d with fields set (%s); retrying without fields",
+        if 400 <= r.status_code < 500 and attempt_body is body:
+            log.warning("TED %d with full fields (%s); retrying minimal",
                         r.status_code, r.text[:200])
             continue
         log.error("TED HTTP %d: %s", r.status_code, r.text[:300])
@@ -374,6 +438,18 @@ def refresh_financials(row: dict, session: requests.Session) -> dict:
         row["annual_revenue_eur"] = float(rev)     # ponytail: assumes reporting ccy≈EUR
         row["_dirty"] = True
     return row
+
+
+def send_heartbeat(session: requests.Session, notices_seen: int, alerts: int) -> None:
+    """Ping a dead-man's-switch URL (e.g. healthchecks.io) so a silent cron
+    failure is noticed. No-op unless TED_HEARTBEAT_URL is set."""
+    url = os.environ.get("TED_HEARTBEAT_URL")
+    if not url:
+        return
+    try:
+        session.get(url, params={"notices": notices_seen, "alerts": alerts}, timeout=15)
+    except requests.RequestException as e:
+        log.warning("heartbeat ping failed: %s", e)
 
 
 def send_telegram_alert(text: str, session: requests.Session) -> bool:
@@ -539,6 +615,9 @@ def scan(dry_run: bool = False) -> int:
                 mark_processed(con, nid)
         if not dry_run:
             con.commit()
+        notices_seen = len(notices)
+    if not dry_run:
+        send_heartbeat(session, notices_seen, alerts)
     log.info("scan complete: %d alert(s) fired", alerts)
     return alerts
 
@@ -568,10 +647,23 @@ def selftest() -> None:
     assert not evaluate({"annual_revenue_eur": 200e6, "market_cap": 5e9},
                         value_eur=100e6)[0]             # cap too big -> hold
 
-    n = extract_notice({"publication-number": "123-2026",
-                        "winner-name": "Exail Technologies SA",
-                        "awarded-value": "40.000.000,00", "awarded-value-cur": "EUR"})
-    assert n["notice_id"] == "123-2026" and n["value"] == 40_000_000.0, n
+    # real live TED shape: multilingual winner-name/title, string-number values
+    real = extract_notice({
+        "publication-number": "449218-2026",
+        "winner-name": {"dan": ["Microsoft Danmark aps"]},
+        "notice-title": {"eng": "Denmark – IT services", "dan": "Danmark"},
+        "result-value-notice": "2976561.85", "result-value-cur-notice": "DKK",
+        "tender-value": ["100"], "tender-value-cur": ["DKK"]})
+    assert real["notice_id"] == "449218-2026", real
+    assert real["winners"] == ["Microsoft Danmark aps"], real["winners"]
+    assert real["value"] == 2976561.85 and real["currency"] == "DKK", real
+    assert real["title"] == "Denmark – IT services", real["title"]
+    assert list(_flatten_strings({"dan": ["A", "B"]})) == ["A", "B"]
+    assert _pick_lang({"fra": "Bonjour"}) == "Bonjour"
+    # deep-extract fallback still parses an unknown schema
+    fb = extract_notice({"publication-number": "1-2026",
+                         "winner-name": "Foo SA", "awarded-value": "40.000.000,00"})
+    assert fb["value"] == 40_000_000.0 and fb["winners"] == ["Foo SA"], fb
     assert _num("1,234,567.89") == 1234567.89 and _num("1.234.567,89") == 1234567.89
     print("selftest: OK")
 

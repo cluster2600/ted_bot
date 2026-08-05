@@ -114,6 +114,8 @@ resource "oci_core_instance" "ted_bot" {
       anthropic_api_key  = var.anthropic_api_key
       ted_llm_model      = var.ted_llm_model
       lookback_days      = var.lookback_days
+      heartbeat_url      = var.heartbeat_url
+      oci_backup_bucket  = var.oci_backup_bucket
     }))
   }
 }

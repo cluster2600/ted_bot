@@ -18,3 +18,5 @@ github_token       = "github_pat_..."                  # only if the repo is pri
 telegram_bot_token = "123456:ABC-your-token"
 telegram_chat_id   = "987654321"
 anthropic_api_key  = "sk-ant-..."                      # optional
+heartbeat_url      = ""                                # optional, e.g. https://hc-ping.com/<uuid>
+oci_backup_bucket  = ""                                # optional OCI bucket for db backups

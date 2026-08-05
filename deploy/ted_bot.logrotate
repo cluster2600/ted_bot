@@ -1,0 +1,11 @@
+# Install to /etc/logrotate.d/ted_bot (cloud-init does this automatically).
+# Keeps ~/ted_scanner.log from growing unbounded on the tiny boot volume.
+/home/opc/ted_scanner.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

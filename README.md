@@ -55,11 +55,13 @@ flowchart TD
 **CPV divisions watched:** Tech/Software `72000000`, Defense/Security
 `35000000`, Biotech/Medical `33000000`, Green Energy/Infra `09330000`.
 
-> ℹ️ **API calibration.** TED's eForms field names change between API revisions.
-> `ted_scanner.py` requests a best-effort field set and, on a `4xx`, retries
-> without it and extracts winner/value/currency by a resilient key-name search.
-> Run `python3 ted_scanner.py --dump 3 | less` to inspect the live JSON shape and
-> tune `REQUEST_FIELDS` / `NOTICE_TYPES` at the top of the script if needed.
+> ℹ️ **API calibration.** The query grammar, the `fields` vocabulary, and the
+> winner/value/currency extraction are validated against the live TED v3 API — a
+> notice's `winner-name` and `notice-title` are language-keyed dicts, values are
+> string-numbers, and `fields` is required from a 1830-term eForms vocabulary. If
+> TED renames a term later, the scanner retries with a minimal field set and falls
+> back to key-name search (and the LLM); re-inspect with
+> `python3 ted_scanner.py --dump 3 | less` and adjust `REQUEST_FIELDS` if needed.
 
 > 🧠 **Adapt-in-the-loop (optional).** Set `ANTHROPIC_API_KEY` to enable a small
 > LLM (`claude-haiku-4-5`) that makes the pipeline self-healing on two fronts:
@@ -178,6 +180,32 @@ ANTHROPIC_API_KEY=sk-ant-...
 > `chmod 600 .env` and keep it out of git (add it to `.gitignore`).
 
 ---
+
+## What only you can do (accounts & secrets)
+
+The code and infra are ready; these need your accounts:
+
+1. **Telegram bot** — create one with [@BotFather](https://t.me/BotFather), copy the
+   token, send your bot a message, then find your chat id:
+   ```bash
+   TELEGRAM_BOT_TOKEN=123:ABC ./deploy/get_chat_id.sh
+   ```
+2. **Whitelist** — copy `deploy/whitelist.example.sql` to `deploy/whitelist.sql`,
+   replace the samples with your real small-cap universe, and commit it (cloud-init
+   auto-seeds it). Accuracy of `annual_revenue_eur` drives materiality.
+3. **OCI API key** — Console → *My profile → API keys → Add API key*; feed the
+   values into `terraform/terraform.tfvars` (see `terraform/README.md`).
+4. **`ANTHROPIC_API_KEY`** *(optional)* — for the Haiku adapter.
+5. **Heartbeat** *(optional but recommended)* — create a check at
+   [healthchecks.io](https://healthchecks.io), put its ping URL in `TED_HEARTBEAT_URL`
+   so a silently-failed cron pages you.
+
+## Operations extras
+
+- **Log rotation** — `deploy/ted_bot.logrotate` (installed to `/etc/logrotate.d/`).
+- **DB backup** — `deploy/backup.sh` runs weekly (Sun 03:15 UTC), keeps 4 local
+  snapshots, and uploads one to `OCI_BACKUP_BUCKET` if set.
+- **Heartbeat** — `TED_HEARTBEAT_URL` is pinged with `?notices=&alerts=` after each run.
 
 ## Command reference
 

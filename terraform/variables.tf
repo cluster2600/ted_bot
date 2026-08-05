@@ -63,3 +63,15 @@ variable "lookback_days" {
   type    = string
   default = "1"
 }
+
+variable "heartbeat_url" {
+  type        = string
+  default     = ""
+  description = "Optional dead-man's-switch URL (e.g. healthchecks.io) pinged after each run."
+}
+
+variable "oci_backup_bucket" {
+  type        = string
+  default     = ""
+  description = "Optional OCI Object Storage bucket for weekly ted.db backups (needs oci CLI on the box)."
+}

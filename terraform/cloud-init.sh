@@ -31,9 +31,14 @@ TELEGRAM_CHAT_ID=${telegram_chat_id}
 ANTHROPIC_API_KEY=${anthropic_api_key}
 TED_LLM_MODEL=${ted_llm_model}
 TED_LOOKBACK_DAYS=${lookback_days}
+TED_HEARTBEAT_URL=${heartbeat_url}
+OCI_BACKUP_BUCKET=${oci_backup_bucket}
 ENV
 chown opc:opc "$${APP}/.env"
 chmod 600 "$${APP}/.env"
+
+# log rotation for the daily scan log
+install -m 0644 "$${APP}/deploy/ted_bot.logrotate" /etc/logrotate.d/ted_bot
 
 # Schema, plus optional whitelist seed (commit deploy/whitelist.sql to enable)
 sudo -u opc "$${APP}/.venv/bin/python" ted_scanner.py --init-db
@@ -45,6 +50,7 @@ fi
 cat > /tmp/ted.cron <<'CRON'
 CRON_TZ=UTC
 45 7 * * * cd /home/opc/ted_bot && set -a && . /home/opc/ted_bot/.env && set +a && .venv/bin/python3 ted_scanner.py >> /home/opc/ted_scanner.log 2>&1
+15 3 * * 0 cd /home/opc/ted_bot && set -a && . /home/opc/ted_bot/.env && set +a && bash deploy/backup.sh >> /home/opc/ted_scanner.log 2>&1
 CRON
 sudo -u opc crontab /tmp/ted.cron
 rm -f /tmp/ted.cron
