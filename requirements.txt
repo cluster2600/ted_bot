@@ -1,0 +1,4 @@
+# ted_bot runtime dependencies (Python 3.9+)
+requests>=2.31        # TED + Telegram HTTP (retry via bundled urllib3)
+yfinance>=0.2.40      # real-time market cap / revenue / FX fallback
+anthropic>=0.69       # Haiku adapt-in-the-loop (optional; needs ANTHROPIC_API_KEY)
