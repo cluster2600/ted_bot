@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import difflib
+import html
 import json
 import logging
 import os
@@ -61,7 +62,7 @@ TED_DETAIL_URL = "https://ted.europa.eu/en/notice/{pub}"
 # High-alpha CPV divisions (matched by prefix on the notice CPV codes).
 CPV_CODES = ["72000000", "35000000", "33000000", "09330000"]
 NOTICE_TYPES = ["can-standard", "can-social"]           # Contract Award Notices
-LOOKBACK_DAYS = int(os.environ.get("TED_LOOKBACK_DAYS", "1"))
+LOOKBACK_DAYS = int(os.environ.get("TED_LOOKBACK_DAYS", "3"))  # >1 covers weekend gaps; dedup makes overlap free
 
 # Validated against the live TED v3 vocabulary (1830 eForms business terms).
 # `fields` is REQUIRED and non-empty; on drift we retry with _MINIMAL_FIELDS.
@@ -459,7 +460,7 @@ def send_telegram_alert(text: str, session: requests.Session) -> bool:
         log.error("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set; cannot send")
         return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat, "text": text, "parse_mode": "Markdown",
+    payload = {"chat_id": chat, "text": text, "parse_mode": "HTML",
                "disable_web_page_preview": False}
     try:
         r = session.post(url, json=payload, timeout=30)
@@ -487,20 +488,25 @@ def evaluate(row: dict, value_eur: float) -> tuple[bool, dict]:
 
 
 def format_alert(row, notice, metrics) -> str:
+    # HTML parse_mode: TED titles/company names contain _ * [ ` freely, which
+    # break Telegram's Markdown parser (400, lost alert). HTML needs only & < >
+    # escaped, so html.escape() on every dynamic field is the robust choice.
+    esc = html.escape
     pct = f"{metrics['materiality'] * 100:.1f}%"
     cap_m = metrics["market_cap"] / 1e6 if metrics["market_cap"] else 0
     val_m = metrics["value_eur"] / 1e6
     link = TED_DETAIL_URL.format(pub=notice["notice_id"])
-    title = notice["title"] or "Contract Award Notice"
+    title = esc(notice["title"] or "Contract Award Notice")
+    company = esc(row["company_name_cleaned"].title())
+    ticker = esc(row.get("ticker") or "n/a")
     return (
-        f"\U0001F6A8 *TED Small-Cap Award Alert*\n\n"
-        f"*Company:* {row['company_name_cleaned'].title()} "
-        f"(`{row.get('ticker') or 'n/a'}`)\n"
-        f"*Contract:* {title}\n"
-        f"*Value:* €{val_m:,.1f}M ({notice['currency']})\n"
-        f"*Materiality:* *{pct}* of revenue\n"
-        f"*Market Cap:* €{cap_m:,.0f}M\n\n"
-        f"[View notice on TED]({link})"
+        f"\U0001F6A8 <b>TED Small-Cap Award Alert</b>\n\n"
+        f"<b>Company:</b> {company} (<code>{ticker}</code>)\n"
+        f"<b>Contract:</b> {title}\n"
+        f"<b>Value:</b> €{val_m:,.1f}M ({esc(notice['currency'])})\n"
+        f"<b>Materiality:</b> <b>{pct}</b> of revenue\n"
+        f"<b>Market Cap:</b> €{cap_m:,.0f}M\n\n"
+        f'<a href="{esc(link)}">View notice on TED</a>'
     )
 
 
@@ -665,6 +671,14 @@ def selftest() -> None:
                          "winner-name": "Foo SA", "awarded-value": "40.000.000,00"})
     assert fb["value"] == 40_000_000.0 and fb["winners"] == ["Foo SA"], fb
     assert _num("1,234,567.89") == 1234567.89 and _num("1.234.567,89") == 1234567.89
+
+    # format_alert must HTML-escape hostile TED text (& < >) so Telegram won't 400
+    msg = format_alert(
+        {"company_name_cleaned": "a & b soft", "ticker": None},
+        {"notice_id": "9-2026", "title": "IT <svc> _consult_ & more", "currency": "EUR"},
+        {"materiality": 0.20, "market_cap": 3e8, "value_eur": 2e6})
+    assert "&amp;" in msg and "&lt;svc&gt;" in msg and "<b>" in msg, msg
+    assert "<svc>" not in msg, msg
     print("selftest: OK")
 
 

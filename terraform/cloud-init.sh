@@ -1,5 +1,6 @@
 #!/bin/bash
-# Rendered by Terraform (templatefile). ${...} = Terraform var, $${...} = shell var.
+# Rendered by Terraform's templatefile: TF variables are substituted here; shell
+# variables are written with a doubled dollar so templatefile leaves them intact.
 # Runs once as root on first boot. Full log at /var/log/ted_bot_bootstrap.log
 set -euxo pipefail
 exec > /var/log/ted_bot_bootstrap.log 2>&1

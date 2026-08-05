@@ -1,10 +1,10 @@
 # --- OCI API auth (see terraform/README.md for how to generate these) --------
-variable "tenancy_ocid"     { type = string }
-variable "user_ocid"        { type = string }
-variable "fingerprint"      { type = string }
+variable "tenancy_ocid" { type = string }
+variable "user_ocid" { type = string }
+variable "fingerprint" { type = string }
 variable "private_key_path" { type = string }
-variable "region"           { type = string }               # e.g. eu-zurich-1
-variable "compartment_ocid" { type = string }               # where to build
+variable "region" { type = string }           # e.g. eu-zurich-1
+variable "compartment_ocid" { type = string } # where to build
 
 # --- Access ------------------------------------------------------------------
 variable "ssh_public_key_path" {
@@ -20,8 +20,8 @@ variable "ssh_ingress_cidr" {
 
 # --- Shape / image -----------------------------------------------------------
 variable "shape" {
-  type        = string
-  default     = "VM.Standard.E2.1.Micro"   # OCI Always-Free AMD micro
+  type    = string
+  default = "VM.Standard.E2.1.Micro" # OCI Always-Free AMD micro
 }
 
 # --- App bootstrap -----------------------------------------------------------
@@ -61,7 +61,7 @@ variable "ted_llm_model" {
 
 variable "lookback_days" {
   type    = string
-  default = "1"
+  default = "3" # >1 covers weekend publication gaps; dedup makes overlap free
 }
 
 variable "heartbeat_url" {
