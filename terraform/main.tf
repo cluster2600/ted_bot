@@ -59,7 +59,7 @@ resource "oci_core_security_list" "sl" {
   vcn_id         = oci_core_vcn.vcn.id
   display_name   = "ted-bot-sl"
 
-  # Outbound: open (needs TED, Telegram, Anthropic, PyPI, GitHub).
+  # Outbound: open (needs TED, Telegram, NVIDIA, PyPI, GitHub).
   egress_security_rules {
     destination = "0.0.0.0/0"
     protocol    = "all"
@@ -112,7 +112,7 @@ resource "oci_core_instance" "ted_bot" {
       github_token       = var.github_token
       telegram_bot_token = var.telegram_bot_token
       telegram_chat_id   = var.telegram_chat_id
-      anthropic_api_key  = var.anthropic_api_key
+      nvidia_api_key     = var.nvidia_api_key
       ted_llm_model      = var.ted_llm_model
       lookback_days      = var.lookback_days
       heartbeat_url      = var.heartbeat_url

@@ -40,7 +40,7 @@ sudo -u opc "$${APP}/.venv/bin/pip" install -r requirements.txt
 cat > "$${APP}/.env" <<'ENV'
 TELEGRAM_BOT_TOKEN=${telegram_bot_token}
 TELEGRAM_CHAT_ID=${telegram_chat_id}
-ANTHROPIC_API_KEY=${anthropic_api_key}
+NVIDIA_API_KEY=${nvidia_api_key}
 TED_LLM_MODEL=${ted_llm_model}
 TED_LOOKBACK_DAYS=${lookback_days}
 TED_HEARTBEAT_URL=${heartbeat_url}

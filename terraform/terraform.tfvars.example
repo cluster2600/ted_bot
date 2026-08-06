@@ -17,6 +17,6 @@ git_repo_slug      = "cluster2600/ted_bot"
 github_token       = "github_pat_..."                  # only if the repo is private
 telegram_bot_token = "123456:ABC-your-token"
 telegram_chat_id   = "987654321"
-anthropic_api_key  = "sk-ant-..."                      # optional
+nvidia_api_key     = ""                                # optionnel (Nemotron, depuis OCI Vault)
 heartbeat_url      = ""                                # optional, e.g. https://hc-ping.com/<uuid>
 oci_backup_bucket  = ""                                # optional OCI bucket for db backups

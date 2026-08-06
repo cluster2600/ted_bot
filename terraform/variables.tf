@@ -47,11 +47,11 @@ variable "telegram_chat_id" {
   sensitive = true
 }
 
-variable "anthropic_api_key" {
+variable "nvidia_api_key" {
   type        = string
   default     = ""
   sensitive   = true
-  description = "Optional — enables the Haiku adapt-in-the-loop layer."
+  description = "Optional — clé NVIDIA (Nemotron) pour la couche adapt-in-the-loop. Récupérée depuis OCI Vault."
 }
 
 variable "ted_llm_model" {

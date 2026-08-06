@@ -14,7 +14,7 @@ Usage:
     python3 ted_scanner.py --selftest          # offline logic self-check
 
 Env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID  (required to send)
-     ANTHROPIC_API_KEY (optional — enables the Haiku adapt-in-the-loop layer)
+     NVIDIA_API_KEY (optional — enables the Nemotron adapt-in-the-loop layer)
      TED_HEARTBEAT_URL (optional — dead-man's-switch ping after each run)
      TED_DB (default ./ted.db), TED_LOOKBACK_DAYS (default 1)
 """
@@ -44,10 +44,7 @@ try:
 except ImportError:  # yfinance is optional at runtime; scan degrades gracefully
     yf = None
 
-try:
-    import anthropic
-except ImportError:  # optional — no key/SDK means pure-heuristic behaviour
-    anthropic = None
+# LLM adapter uses the NVIDIA endpoint (OpenAI-compatible) over plain requests.
 
 # --------------------------------------------------------------------------- #
 # Configuration (env-overridable; the field list is the main calibration knob) #
@@ -82,7 +79,8 @@ MARKET_CAP_MIN = 100_000_000           # EUR
 MARKET_CAP_MAX = 2_000_000_000         # EUR
 FUZZY_THRESHOLD = 0.87                 # difflib ratio to auto-accept a whitelist match
 FUZZY_SOFT = 0.70                      # in [SOFT, THRESHOLD): ask the LLM to confirm
-LLM_MODEL = os.environ.get("TED_LLM_MODEL", "claude-haiku-4-5")  # small, cheap adapter
+NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+LLM_MODEL = os.environ.get("TED_LLM_MODEL", "nvidia/nemotron-3-ultra-550b-a55b")
 PAGE_LIMIT = 100
 MAX_PAGES = 50                         # hard stop; 5000 notices/run is plenty
 
@@ -121,22 +119,10 @@ def top_candidate(winner_clean: str, whitelist: list[dict]) -> tuple[dict | None
 
 
 # --------------------------------------------------------------------------- #
-# LLM adapter (Haiku) — recovers drifted fields & confirms borderline matches  #
-# Optional: no ANTHROPIC_API_KEY / no SDK -> every call returns None, behaviour #
+# LLM adapter (NVIDIA Nemotron) — recovers drifted fields & confirms matches   #
+# Optional: no NVIDIA_API_KEY -> every call returns None, behaviour identical    #
 # is identical to pure heuristics. ponytail: one small model, no thinking, cheap#
 # --------------------------------------------------------------------------- #
-_llm_client = None
-
-
-def _get_llm():
-    global _llm_client
-    if anthropic is None or not os.environ.get("ANTHROPIC_API_KEY"):
-        return None
-    if _llm_client is None:
-        _llm_client = anthropic.Anthropic()
-    return _llm_client
-
-
 def _parse_json_blob(text: str | None) -> dict | None:
     """Pull the first {...} object out of an LLM reply, tolerating surrounding prose."""
     if not text:
@@ -151,23 +137,28 @@ def _parse_json_blob(text: str | None) -> dict | None:
 
 
 def _llm_json(prompt: str) -> dict | None:
-    client = _get_llm()
-    if client is None:
+    key = os.environ.get("NVIDIA_API_KEY")
+    if not key:
         return None
     try:
-        msg = client.messages.create(
-            model=LLM_MODEL, max_tokens=300,
-            messages=[{"role": "user", "content": prompt}],
-        )
-    except Exception as e:  # network, auth, rate limit — degrade to heuristics
-        log.warning("LLM call failed: %s", e)
+        r = requests.post(
+            NVIDIA_URL, timeout=60,
+            headers={"Authorization": f"Bearer {key}"},
+            json={"model": LLM_MODEL, "max_tokens": 512, "temperature": 0.2,
+                  "chat_template_kwargs": {"enable_thinking": False},
+                  "messages": [{"role": "user", "content": prompt}]})
+        if r.status_code != 200:
+            log.warning("NVIDIA LLM HTTP %d: %s", r.status_code, r.text[:200])
+            return None
+        text = r.json()["choices"][0]["message"]["content"]
+    except (requests.RequestException, KeyError, ValueError, IndexError) as e:
+        log.warning("NVIDIA LLM call failed: %s", e)
         return None
-    text = "".join(b.text for b in msg.content if b.type == "text")
     return _parse_json_blob(text)
 
 
 def llm_extract(notice: dict) -> dict | None:
-    """Ask Haiku to read winner/value/currency straight from a raw notice."""
+    """Ask the LLM to read winner/value/currency straight from a raw notice."""
     prompt = (
         "Parse this EU TED procurement Contract Award Notice (JSON). Extract the company "
         "that WON the contract and the total awarded amount. Reply with ONLY minified JSON: "
@@ -574,7 +565,7 @@ def scan(dry_run: bool = False) -> int:
             if already_processed(con, nid):
                 continue
             # Adapt to schema drift: if the heuristics found no winner or no value,
-            # let Haiku read them straight from the raw notice.
+            # let the LLM read them straight from the raw notice.
             if not info["winners"] or info["value"] is None:
                 filled = llm_extract(raw)
                 if filled:
