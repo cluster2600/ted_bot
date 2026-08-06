@@ -92,13 +92,7 @@ resource "oci_core_instance" "ted_bot" {
   compartment_id      = var.compartment_ocid
   availability_domain = data.oci_identity_availability_domains.ads.availability_domains[0].name
   display_name        = "ted-bot"
-  shape               = var.shape
-
-  # A1.Flex est une shape flexible -> OCPU/RAM explicites (quota ARM Always-Free).
-  shape_config {
-    ocpus         = var.ocpus
-    memory_in_gbs = var.memory_in_gbs
-  }
+  shape               = var.shape # E2.1.Micro : shape fixe, pas de shape_config
 
   create_vnic_details {
     subnet_id        = oci_core_subnet.sn.id
