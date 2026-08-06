@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """ted_bot — daily EU TED Contract-Award scanner for small-cap materiality alerts.
 
-Flow: TED v3 search API -> CPV/date/notice-type filter -> fuzzy-match winner text
-against the local SQLite whitelist -> optional yfinance refresh -> materiality &
-market-cap gate -> Telegram push. Idempotent: every examined notice is recorded so
-re-runs never double-alert.
+Flow: TED v3 search API -> CPV/date/notice-type filter -> resolve each winner to a
+listed company (whitelist fuzzy-match, else LLM consolidates subsidiary -> listed
+parent + ticker, cached) -> yfinance financials -> materiality & market-cap gate ->
+Telegram push. Idempotent: every examined notice is recorded and every winner
+resolution cached, so re-runs never double-alert or re-query the LLM.
 
 Usage:
     python3 ted_scanner.py --init-db          # create tables from schema.sql
@@ -74,7 +75,8 @@ REQUEST_FIELDS = [
 _MINIMAL_FIELDS = ["publication-number", "notice-type", "winner-name",
                    "result-value-notice", "result-value-cur-notice"]
 
-MATERIALITY_THRESHOLD = 0.15           # contract EUR / annual revenue EUR
+MATERIALITY_THRESHOLD = 0.15           # contract EUR / annual revenue EUR (top-line impact)
+CAP_MATERIALITY_THRESHOLD = 0.10       # contract EUR / market cap (valuation impact)
 MARKET_CAP_MIN = 100_000_000           # EUR
 MARKET_CAP_MAX = 2_000_000_000         # EUR
 FUZZY_THRESHOLD = 0.87                 # difflib ratio to auto-accept a whitelist match
@@ -183,6 +185,45 @@ def llm_same_entity(winner: str, company: str) -> bool:
     )
     data = _llm_json(prompt)
     return bool(data and data.get("same") is True)
+
+
+def _parent_from_blob(data: dict | None) -> dict | None:
+    """Turn an llm_resolve_parent reply into a whitelist-shaped row, or None.
+
+    Requires listed==true AND a ticker; otherwise the winner is treated as
+    private/unlisted (caller caches the negative so we never re-ask).
+    """
+    if not data or data.get("listed") is not True:
+        return None
+    ticker = (data.get("ticker") or "").strip()
+    if not ticker:
+        return None
+    return {"parent_name": (data.get("parent_name") or "").strip() or None,
+            "ticker": ticker,
+            "exchange": (data.get("exchange") or None)}
+
+
+def llm_resolve_parent(winner: str) -> dict | None:
+    """Resolve a procurement winner to its publicly-listed parent (or itself).
+
+    This is the consolidation step: a TED/simap winner is usually the *local
+    legal entity* ('Siemens Healthcare GmbH'), not the listed group. The LLM
+    maps it to the ultimate listed parent + Yahoo-Finance ticker
+    ('Siemens Healthineers', SHL.DE). Returns a whitelist-shaped dict
+    {parent_name, ticker, exchange} when listed, else None.
+    """
+    prompt = (
+        f'A company named "{winner}" won a European public-procurement contract. '
+        "Determine whether it is publicly listed on a stock exchange, OR is a "
+        "subsidiary whose ULTIMATE parent is publicly listed. Reply with ONLY "
+        "minified JSON: "
+        '{"listed": true|false, "parent_name": string|null, '
+        '"ticker": string|null, "exchange": string|null}. '
+        '"ticker" MUST be the Yahoo Finance symbol of the listed (parent) entity '
+        'including its market suffix (e.g. "SHL.DE", "ROG.SW", "EXA.PA"), or null '
+        "if not listed. Do not guess; use null when unsure."
+    )
+    return _parent_from_blob(_llm_json(prompt))
 
 
 # --------------------------------------------------------------------------- #
@@ -301,11 +342,15 @@ def extract_notice(notice: dict) -> dict:
         if value is None:
             value, currency = v2, (currency or c2)
 
+    lots = notice.get("result-value-lot")
+    n_lots = len(lots) if isinstance(lots, list) else (1 if value else 0)
+
     return {
         "notice_id": str(pub) if pub else json.dumps(notice, sort_keys=True)[:64],
         "winners": winners,
         "value": value,
         "currency": (currency or "EUR").upper(),
+        "lots": n_lots,
         "title": _pick_lang(notice.get("notice-title")),
     }
 
@@ -467,15 +512,23 @@ def send_telegram_alert(text: str, session: requests.Session) -> bool:
 # Decision + alert formatting                                                  #
 # --------------------------------------------------------------------------- #
 def evaluate(row: dict, value_eur: float) -> tuple[bool, dict]:
-    """Apply the materiality and market-cap gate. Returns (fire, metrics)."""
+    """The core equation: will this contract move a listed small-cap's valuation?
+
+    Fires when the company is a small-cap (cap in band) AND the contract is
+    material either against revenue (top-line, >=15%) OR against market cap
+    (valuation, >=10%). The cap ratio also lets a contract fire when yfinance
+    returns market cap but no revenue. Returns (fire, metrics).
+    """
     rev = row.get("annual_revenue_eur")
     cap = row.get("market_cap")
     materiality = (value_eur / rev) if (rev and rev > 0) else None
-    metrics = {"materiality": materiality, "market_cap": cap,
+    cap_ratio = (value_eur / cap) if (cap and cap > 0) else None
+    metrics = {"materiality": materiality, "cap_ratio": cap_ratio, "market_cap": cap,
                "annual_revenue_eur": rev, "value_eur": value_eur}
-    fire = (materiality is not None and materiality >= MATERIALITY_THRESHOLD
-            and cap is not None and MARKET_CAP_MIN <= cap <= MARKET_CAP_MAX)
-    return fire, metrics
+    in_band = cap is not None and MARKET_CAP_MIN <= cap <= MARKET_CAP_MAX
+    impactful = ((materiality is not None and materiality >= MATERIALITY_THRESHOLD)
+                 or (cap_ratio is not None and cap_ratio >= CAP_MATERIALITY_THRESHOLD))
+    return (in_band and impactful), metrics
 
 
 def format_alert(row, notice, metrics) -> str:
@@ -483,9 +536,12 @@ def format_alert(row, notice, metrics) -> str:
     # break Telegram's Markdown parser (400, lost alert). HTML needs only & < >
     # escaped, so html.escape() on every dynamic field is the robust choice.
     esc = html.escape
-    pct = f"{metrics['materiality'] * 100:.1f}%"
     cap_m = metrics["market_cap"] / 1e6 if metrics["market_cap"] else 0
     val_m = metrics["value_eur"] / 1e6
+    mat = f"{metrics['materiality'] * 100:.1f}% of revenue" if metrics.get("materiality") else "revenue n/a"
+    capr = f"{metrics['cap_ratio'] * 100:.1f}% of market cap" if metrics.get("cap_ratio") else "—"
+    lots = notice.get("lots") or 1
+    lot_txt = f"{lots} lots" if lots != 1 else "1 lot"
     link = TED_DETAIL_URL.format(pub=notice["notice_id"])
     title = esc(notice["title"] or "Contract Award Notice")
     company = esc(row["company_name_cleaned"].title())
@@ -494,8 +550,8 @@ def format_alert(row, notice, metrics) -> str:
         f"\U0001F6A8 <b>TED Small-Cap Award Alert</b>\n\n"
         f"<b>Company:</b> {company} (<code>{ticker}</code>)\n"
         f"<b>Contract:</b> {title}\n"
-        f"<b>Value:</b> €{val_m:,.1f}M ({esc(notice['currency'])})\n"
-        f"<b>Materiality:</b> <b>{pct}</b> of revenue\n"
+        f"<b>Value:</b> €{val_m:,.1f}M ({esc(notice['currency'])}, {esc(lot_txt)})\n"
+        f"<b>Impact:</b> <b>{esc(mat)}</b> · {esc(capr)}\n"
         f"<b>Market Cap:</b> €{cap_m:,.0f}M\n\n"
         f'<a href="{esc(link)}">View notice on TED</a>'
     )
@@ -545,15 +601,94 @@ def mark_processed(con, notice_id) -> None:
                 (notice_id,))
 
 
+# Resolution cache: winner_clean -> listed?/ticker. Caches BOTH hits and misses
+# so the LLM is asked about any given winner (mostly private distributors) once,
+# ever. ponytail: created lazily so existing DBs need no migration.
+def ensure_resolution_cache(con) -> None:
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS resolved_entities ("
+        " winner_clean TEXT PRIMARY KEY, listed INTEGER NOT NULL,"
+        " parent_name TEXT, ticker TEXT, exchange TEXT,"
+        " resolved_at TEXT DEFAULT (datetime('now')))")
+
+
+def resolution_get(con, winner_clean):
+    """Return cached row dict, or None if this winner was never resolved."""
+    r = con.execute("SELECT listed, parent_name, ticker, exchange "
+                    "FROM resolved_entities WHERE winner_clean=?",
+                    (winner_clean,)).fetchone()
+    return dict(r) if r else None
+
+
+def resolution_put(con, winner_clean, parent) -> None:
+    """Cache a resolution. parent=None marks a confirmed non-listed winner."""
+    con.execute(
+        "INSERT OR REPLACE INTO resolved_entities"
+        "(winner_clean, listed, parent_name, ticker, exchange, resolved_at)"
+        " VALUES (?,?,?,?,?, datetime('now'))",
+        (winner_clean, 1 if parent else 0,
+         parent["parent_name"] if parent else None,
+         parent["ticker"] if parent else None,
+         parent["exchange"] if parent else None))
+
+
 # --------------------------------------------------------------------------- #
 # Main scan                                                                    #
 # --------------------------------------------------------------------------- #
+def resolve_winner(con, winner: str, whitelist: list[dict],
+                   allow_cache_write: bool) -> dict | None:
+    """Map a procurement winner to a *listed* company row, or None.
+
+    1. Fuzzy-match the local whitelist (fast, free allowlist).
+    2. Else consult the persistent resolution cache.
+    3. Else ask the LLM to consolidate subsidiary -> listed parent, and cache it
+       (hit AND miss, so any given winner costs at most one LLM call ever).
+
+    Returns a whitelist-shaped dict; whitelist rows carry an id, LLM-resolved
+    parents carry id=None (never written back to the whitelist).
+    """
+    wc = clean_name(winner)
+    if not wc:
+        return None
+    row, score = top_candidate(wc, whitelist)
+    if row:
+        accepted = score >= FUZZY_THRESHOLD
+        if not accepted and score >= FUZZY_SOFT \
+                and llm_same_entity(winner, row["company_name_cleaned"]):
+            log.info("LLM confirmed borderline match (%.2f)", score)
+            accepted = True
+        if accepted:
+            log.info("whitelist match: '%s' ~ '%s' (%.2f)", winner,
+                     row["company_name_cleaned"], score)
+            return row
+    # Off-whitelist: consolidate the winner to its listed parent (subsidiary -> group).
+    cached = resolution_get(con, wc)
+    if cached is not None:
+        if not cached["listed"]:
+            return None
+        parent = {"parent_name": cached["parent_name"], "ticker": cached["ticker"],
+                  "exchange": cached["exchange"]}
+    else:
+        parent = llm_resolve_parent(winner)
+        if allow_cache_write:
+            resolution_put(con, wc, parent)
+        if not parent:
+            return None
+        log.info("LLM resolved '%s' -> listed parent %s (%s)", winner,
+                 parent["parent_name"], parent["ticker"])
+    return {"id": None,
+            "company_name_cleaned": clean_name(parent["parent_name"] or winner) or wc,
+            "ticker": parent["ticker"], "exchange": parent["exchange"],
+            "market_cap": None, "annual_revenue_eur": None}
+
+
 def scan(dry_run: bool = False) -> int:
     session = http_session()
     with connect() as con:
+        ensure_resolution_cache(con)
         whitelist = load_whitelist(con)
         if not whitelist:
-            log.warning("whitelist is empty — populate small_caps_whitelist first")
+            log.warning("whitelist is empty — LLM resolution still catches listed winners")
         notices = fetch_notices(session)
         log.info("fetched %d notices; whitelist has %d companies",
                  len(notices), len(whitelist))
@@ -577,20 +712,12 @@ def scan(dry_run: bool = False) -> int:
                         log.info("LLM recovered value for %s: %s %s", nid,
                                  filled["value"], filled["currency"])
             for winner in info["winners"]:
-                row, score = top_candidate(clean_name(winner), whitelist)
+                row = resolve_winner(con, winner, whitelist,
+                                     allow_cache_write=not dry_run)
                 if not row:
                     continue
-                accepted = score >= FUZZY_THRESHOLD
-                if not accepted and score >= FUZZY_SOFT \
-                        and llm_same_entity(winner, row["company_name_cleaned"]):
-                    log.info("LLM confirmed borderline match (%.2f)", score)
-                    accepted = True
-                if not accepted:
-                    continue
-                log.info("match: '%s' ~ '%s' (%.2f)", winner,
-                         row["company_name_cleaned"], score)
                 row = refresh_financials(row, session)
-                if row.pop("_dirty", False) and not dry_run:
+                if row.get("id") and row.pop("_dirty", False) and not dry_run:
                     persist_row(con, row)
                 value_eur = to_eur(info["value"], info["currency"])
                 if value_eur is None:
@@ -638,11 +765,21 @@ def selftest() -> None:
     assert _parse_json_blob('noise {"same": true} tail') == {"same": True}
     assert _parse_json_blob("no json here") is None
 
+    # subsidiary -> listed-parent consolidation: needs listed==true AND a ticker
+    assert _parent_from_blob({"listed": True, "parent_name": "Siemens Healthineers",
+                              "ticker": "SHL.DE", "exchange": "Xetra"})["ticker"] == "SHL.DE"
+    assert _parent_from_blob({"listed": False, "ticker": None}) is None
+    assert _parent_from_blob({"listed": True, "ticker": ""}) is None      # listed, no ticker
+    assert _parent_from_blob(None) is None
+
     fire, m = evaluate(wl[0], value_eur=40e6)          # 40/200 = 20% >= 15%, cap in band
     assert fire and abs(m["materiality"] - 0.20) < 1e-9
     assert not evaluate(wl[0], value_eur=10e6)[0]       # 5% materiality -> hold
     assert not evaluate({"annual_revenue_eur": 200e6, "market_cap": 5e9},
                         value_eur=100e6)[0]             # cap too big -> hold
+    # valuation-materiality path: fires on contract/market-cap even with no revenue
+    assert evaluate({"market_cap": 500e6}, value_eur=100e6)[0]      # 20% of cap, in band
+    assert not evaluate({"market_cap": 500e6}, value_eur=10e6)[0]   # 2% of cap -> hold
 
     # real live TED shape: multilingual winner-name/title, string-number values
     real = extract_notice({

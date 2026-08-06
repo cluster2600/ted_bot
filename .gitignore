@@ -16,4 +16,3 @@ terraform/terraform.tfvars
 *.tfplan
 
 # seeded watchlist may hold your private target list
-deploy/whitelist.sql
