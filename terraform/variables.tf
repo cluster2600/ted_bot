@@ -21,7 +21,17 @@ variable "ssh_ingress_cidr" {
 # --- Shape / image -----------------------------------------------------------
 variable "shape" {
   type    = string
-  default = "VM.Standard.E2.1.Micro" # OCI Always-Free AMD micro
+  default = "VM.Standard.A1.Flex" # Always-Free ARM Ampere (max gratuit en 1 VM)
+}
+
+variable "ocpus" {
+  type    = number
+  default = 4 # quota ARM Always-Free : 4 OCPU
+}
+
+variable "memory_in_gbs" {
+  type    = number
+  default = 24 # quota ARM Always-Free : 24 Go RAM
 }
 
 # --- App bootstrap -----------------------------------------------------------
