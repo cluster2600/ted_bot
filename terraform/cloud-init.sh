@@ -7,13 +7,16 @@ exec > /var/log/ted_bot_bootstrap.log 2>&1
 
 APP=/home/opc/ted_bot
 
-# Swap 2G — pip (pandas/numpy via yfinance) et le runtime sont serrés sur 1 GB.
-# ponytail: swapfile simple, largement suffisant pour un cron.
-if [ ! -f /swapfile ]; then
-  fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
-  chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
-  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+# Swap 3G AVANT tout dnf/pip : 1 GB seul fait OOM-killer sur dnf (constaté).
+# dd (pas fallocate) -> fichier sans trous, sinon swapon refuse et on reste à 1 GB.
+if ! swapon --show 2>/dev/null | grep -q /swapfile; then
+  dd if=/dev/zero of=/swapfile bs=1M count=3072 status=none
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
+swapon --show   # trace le swap actif dans le log de bootstrap
 
 dnf install -y python3 python3-pip git sqlite
 timedatectl set-timezone UTC || true
