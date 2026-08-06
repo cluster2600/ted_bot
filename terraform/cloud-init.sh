@@ -7,6 +7,14 @@ exec > /var/log/ted_bot_bootstrap.log 2>&1
 
 APP=/home/opc/ted_bot
 
+# Swap 2G — pip (pandas/numpy via yfinance) et le runtime sont serrés sur 1 GB.
+# ponytail: swapfile simple, largement suffisant pour un cron.
+if [ ! -f /swapfile ]; then
+  fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+  chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
 dnf install -y python3 python3-pip git sqlite
 timedatectl set-timezone UTC || true
 
@@ -56,7 +64,9 @@ CRON
 sudo -u opc crontab /tmp/ted.cron
 rm -f /tmp/ted.cron
 
-# One dry run to validate wiring (sends nothing, records nothing)
+# Validate wiring (silent), then ANNOUNCE successful deploy on Telegram so the
+# box proves itself end-to-end (clone+venv+pip+.env+egress) without SSH.
 sudo -u opc bash -c 'cd /home/opc/ted_bot && set -a && . .env && set +a && .venv/bin/python ted_scanner.py --dry-run -v' || true
+sudo -u opc bash -c 'cd /home/opc/ted_bot && set -a && . .env && set +a && .venv/bin/python ted_scanner.py --test-telegram' || true
 
 echo "ted_bot bootstrap complete"
