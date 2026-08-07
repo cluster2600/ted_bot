@@ -26,10 +26,10 @@ flowchart TD
     A["cron @ 07:45 UTC"] --> B["ted_scanner.py"]
     B --> C["EU TED v3 API<br/>POST /v3/notices/search"]
     C -->|"CPV + notice-type + date filter"| D["Filtering Engine"]
-    D -->|"heuristics empty? recover fields"| L["Haiku LLM adapter<br/>extract winner / value / currency"]
+    D -->|"heuristics empty? recover fields"| L["Nemotron LLM adapter<br/>extract winner / value / currency"]
     L --> E
     D --> E{"SQLite<br/>small_caps_whitelist"}
-    E -->|"difflib fuzzy match<br/>(borderline → Haiku confirms)"| F{"Winner on watchlist?"}
+    E -->|"difflib fuzzy match<br/>(borderline → Nemotron confirms)"| F{"Winner on watchlist?"}
     F -->|no| G["record in processed_notices → next"]
     F -->|yes| H["yfinance sanity check<br/>market cap / revenue / FX"]
     H --> I{"Materiality ≥ 15%<br/>AND €100M ≤ cap ≤ €2B ?"}
@@ -63,15 +63,19 @@ flowchart TD
 > back to key-name search (and the LLM); re-inspect with
 > `python3 ted_scanner.py --dump 3 | less` and adjust `REQUEST_FIELDS` if needed.
 
-> 🧠 **Adapt-in-the-loop (optional).** Set `ANTHROPIC_API_KEY` to enable a small
-> LLM (`claude-haiku-4-5`) that makes the pipeline self-healing on two fronts:
-> when the key-name heuristics can't read a notice (schema drift), Haiku extracts
+> 🧠 **Adapt-in-the-loop (optional).** Set `NVIDIA_API_KEY` to enable a small
+> LLM (`nvidia/nemotron-3-ultra-550b-a55b`, served by
+> `integrate.api.nvidia.com`) that makes the pipeline self-healing on two fronts:
+> when the key-name heuristics can't read a notice (schema drift), the model extracts
 > `winner` / `value` / `currency` straight from the raw JSON; and when a fuzzy
-> match lands in the grey zone (difflib ratio `0.70–0.87`), Haiku decides whether
+> match lands in the grey zone (difflib ratio `0.70–0.87`), the model decides whether
 > the TED winner and the watchlist company are the same entity — catching
 > translations, abbreviations, and holding-company names difflib misses. **No key
 > set → the LLM calls return `None` and the scanner runs pure-heuristic, at zero
-> cost.** Override the model with `TED_LLM_MODEL`.
+> cost.** Override the model with `TED_LLM_MODEL` — it must be an NVIDIA id of the
+> form `vendor/model`; a bare name is rejected by the endpoint, and the scanner now
+> exits non-zero (and withholds the heartbeat) rather than reporting a green,
+> alert-less run.
 
 ---
 
@@ -97,7 +101,7 @@ python3 ted_scanner.py --init-db
 # 5. Telegram credentials (create a bot via @BotFather, get your chat id)
 export TELEGRAM_BOT_TOKEN="123456:ABC-your-token"
 export TELEGRAM_CHAT_ID="987654321"
-export ANTHROPIC_API_KEY="sk-ant-..."   # optional — enables the Haiku adapter
+export NVIDIA_API_KEY="nvapi-..."       # optional — enables the Nemotron adapter
 
 # 6. Verify offline logic, then a live no-send dry run
 python3 ted_scanner.py --selftest
@@ -142,8 +146,17 @@ Leave `annual_revenue_eur` or `market_cap` **NULL** to have the scanner fetch an
 persist them from `yfinance` on the next matching run (a `ticker` is required for
 that). Populated rows are reused as-is, so you control accuracy.
 
-> **Materiality math is only as good as `annual_revenue_eur`.** For non-EUR
-> reporters, store revenue already converted to EUR.
+> **Materiality math is only as good as `annual_revenue_eur`.** Rows the scanner
+> fills from `yfinance` are converted to EUR automatically — market cap from the
+> quote currency, revenue from the *reporting* currency (they differ: `AVON.L`
+> quotes in GBp but reports in USD). Rows **you** insert by hand are taken at face
+> value, so store those already converted to EUR.
+
+> ⚠️ **Upgrading from a build before the FX fix?** Cached rows hold raw
+> yfinance figures in the stock's own currency, and a row with both fields set is
+> never refetched — so run `python3 ted_scanner.py --reset-financials` once. Until
+> you do, every non-EUR company keeps failing the €100M–€2B band by roughly its FX
+> rate (a DKK cap reads ~7.5x too large and is silently rejected as "too big").
 
 ---
 
@@ -174,7 +187,7 @@ an env file at the start of the command:
 ```dotenv
 TELEGRAM_BOT_TOKEN=123456:ABC-your-token
 TELEGRAM_CHAT_ID=987654321
-ANTHROPIC_API_KEY=sk-ant-...
+NVIDIA_API_KEY=nvapi-...
 ```
 
 > `chmod 600 .env` and keep it out of git (add it to `.gitignore`).
@@ -201,7 +214,8 @@ The code and infra are ready; these need your accounts:
    `annual_revenue_eur` accuracy drives materiality.
 3. **OCI API key** — Console → *My profile → API keys → Add API key*; feed the
    values into `terraform/terraform.tfvars` (see `terraform/README.md`).
-4. **`ANTHROPIC_API_KEY`** *(optional)* — for the Haiku adapter.
+4. **`NVIDIA_API_KEY`** *(optional)* — for the Nemotron adapter; get one at
+   [build.nvidia.com](https://build.nvidia.com).
 5. **Heartbeat** *(optional but recommended)* — create a check at
    [healthchecks.io](https://healthchecks.io), put its ping URL in `TED_HEARTBEAT_URL`
    so a silently-failed cron pages you.
@@ -223,6 +237,7 @@ The code and infra are ready; these need your accounts:
 | `python3 ted_scanner.py` | daily scan (cron target) |
 | `python3 ted_scanner.py --dry-run -v` | scan and log decisions; send nothing, record nothing |
 | `python3 ted_scanner.py --dump 3` | print raw JSON of 3 notices (field discovery) |
+| `python3 ted_scanner.py --reset-financials` | clear cached cap/revenue so they refetch in EUR |
 | `python3 ted_scanner.py --selftest` | offline logic self-check |
 
 ## License

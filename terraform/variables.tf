@@ -55,8 +55,17 @@ variable "nvidia_api_key" {
 }
 
 variable "ted_llm_model" {
-  type    = string
-  default = "claude-haiku-4-5"
+  type        = string
+  default     = "nvidia/nemotron-3-ultra-550b-a55b"
+  description = "Modèle servi par integrate.api.nvidia.com (format vendeur/modèle). Doit rester aligné sur LLM_MODEL dans ted_scanner.py."
+
+  validation {
+    # Un id NVIDIA est toujours "vendeur/modèle" — un nom d'un autre fournisseur
+    # (ex. l'ancien "claude-haiku-4-5") passait silencieusement et faisait échouer
+    # 100 % des appels LLM en production.
+    condition     = can(regex("^[a-z0-9_.-]+/[a-z0-9_.-]+$", var.ted_llm_model))
+    error_message = "ted_llm_model doit être un id NVIDIA de la forme vendeur/modèle, ex. nvidia/nemotron-3-ultra-550b-a55b."
+  }
 }
 
 variable "lookback_days" {

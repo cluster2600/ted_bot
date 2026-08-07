@@ -18,5 +18,6 @@ github_token       = "github_pat_..."                  # only if the repo is pri
 telegram_bot_token = "123456:ABC-your-token"
 telegram_chat_id   = "987654321"
 nvidia_api_key     = ""                                # optionnel (Nemotron, depuis OCI Vault)
+# ted_llm_model    = "nvidia/nemotron-3-ultra-550b-a55b"  # id NVIDIA "vendeur/modèle" ; laisser par défaut
 heartbeat_url      = ""                                # optional, e.g. https://hc-ping.com/<uuid>
 oci_backup_bucket  = ""                                # optional OCI bucket for db backups

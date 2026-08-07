@@ -138,10 +138,23 @@ def _parse_json_blob(text: str | None) -> dict | None:
         return None
 
 
+class LLMAdapterError(RuntimeError):
+    """The LLM adapter was configured but every call failed — a config error, not a quiet day."""
+
+
+# Call tally for the run. A misconfigured adapter (wrong model id, dead key) fails
+# every single call while the scan still exits 0 with zero alerts — indistinguishable
+# from "quiet day" unless we count and report it. See llm_health_report().
+_LLM_CALLS = 0
+_LLM_FAILURES = 0
+
+
 def _llm_json(prompt: str) -> dict | None:
+    global _LLM_CALLS, _LLM_FAILURES
     key = os.environ.get("NVIDIA_API_KEY")
     if not key:
         return None
+    _LLM_CALLS += 1
     try:
         r = requests.post(
             NVIDIA_URL, timeout=60,
@@ -150,13 +163,47 @@ def _llm_json(prompt: str) -> dict | None:
                   "chat_template_kwargs": {"enable_thinking": False},
                   "messages": [{"role": "user", "content": prompt}]})
         if r.status_code != 200:
-            log.warning("NVIDIA LLM HTTP %d: %s", r.status_code, r.text[:200])
+            _LLM_FAILURES += 1
+            log.error("NVIDIA LLM HTTP %d for model %r: %s",
+                      r.status_code, LLM_MODEL, r.text[:200])
             return None
         text = r.json()["choices"][0]["message"]["content"]
     except (requests.RequestException, KeyError, ValueError, IndexError) as e:
-        log.warning("NVIDIA LLM call failed: %s", e)
+        _LLM_FAILURES += 1
+        log.error("NVIDIA LLM call failed (model %r): %s", LLM_MODEL, e)
         return None
     return _parse_json_blob(text)
+
+
+def check_llm_config() -> None:
+    """Warn at startup when the adapter is configured with a non-NVIDIA model id.
+
+    Every id served by integrate.api.nvidia.com is "vendor/model". A bare name —
+    e.g. the "claude-haiku-4-5" left behind by the Anthropic->Nemotron switch —
+    is rejected by the endpoint, so all recovery and match-confirmation silently
+    stops and the scan reports zero alerts.
+    """
+    if not os.environ.get("NVIDIA_API_KEY"):
+        return
+    if "/" not in LLM_MODEL:
+        log.error("TED_LLM_MODEL=%r is not an NVIDIA model id (expected vendor/model, "
+                  "e.g. nvidia/nemotron-3-ultra-550b-a55b) — every LLM call will fail",
+                  LLM_MODEL)
+
+
+def llm_health_report() -> bool:
+    """Log the adapter's tally. False when it was configured but wholly unusable."""
+    if not _LLM_CALLS:
+        return True
+    if _LLM_FAILURES == _LLM_CALLS:
+        log.error("LLM adapter unusable: all %d call(s) failed with model %r — winner "
+                  "recovery and fuzzy-match confirmation were skipped this run, so "
+                  "alerts may be missing", _LLM_CALLS, LLM_MODEL)
+        return False
+    if _LLM_FAILURES:
+        log.warning("LLM adapter degraded: %d/%d call(s) failed",
+                    _LLM_FAILURES, _LLM_CALLS)
+    return True
 
 
 def llm_extract(notice: dict) -> dict | None:
@@ -455,8 +502,28 @@ def to_eur(amount: float, currency: str) -> float | None:
     return amount * rate
 
 
+# Quotes can be denominated in minor units (AVON.L reports "GBp"), but marketCap
+# and totalRevenue are always returned in major units — so only the code needs
+# normalising, never the magnitude.
+_MINOR_UNIT_CCY = {"GBX": "GBP", "ZAC": "ZAR", "ILA": "ILS"}
+
+
+def _norm_ccy(code: str | None) -> str:
+    """Normalise a yfinance currency code to ISO-4217 (GBp/GBX -> GBP)."""
+    cur = (code or "EUR").upper()
+    return _MINOR_UNIT_CCY.get(cur, cur)
+
+
 def refresh_financials(row: dict, session: requests.Session) -> dict:
-    """Top up missing market_cap / annual_revenue_eur from yfinance, in place."""
+    """Top up missing market_cap / annual_revenue_eur from yfinance, in place.
+
+    Both gates are denominated in EUR, so each figure is converted from its own
+    source currency: the quote currency for market cap, and the reporting currency
+    of the statements for revenue. They genuinely differ — AVON.L quotes in GBp but
+    reports revenue in USD. Storing raw yfinance numbers (as this did before) made
+    every non-EUR company fail the €100M–€2B band by roughly its FX rate: a DKK or
+    SEK cap reads ~7-11x too large and is silently rejected as "too big".
+    """
     if yf is None or not row.get("ticker"):
         return row
     if row.get("market_cap") and row.get("annual_revenue_eur"):
@@ -468,12 +535,32 @@ def refresh_financials(row: dict, session: requests.Session) -> dict:
         return row
     cap = info.get("marketCap")
     rev = info.get("totalRevenue")
+    cap_ccy = _norm_ccy(info.get("currency"))
+    rev_ccy = _norm_ccy(info.get("financialCurrency") or info.get("currency"))
     if cap and not row.get("market_cap"):
-        row["market_cap"] = float(cap)
-        row["_dirty"] = True
+        # Leave NULL rather than persist an unconverted figure: the row is cached,
+        # so a wrong value would poison every future run, not just this one.
+        cap_eur = to_eur(float(cap), cap_ccy)
+        if cap_eur is None:
+            log.warning("market cap for %s left unset: no %s->EUR rate",
+                        row["ticker"], cap_ccy)
+        else:
+            if cap_ccy != "EUR":
+                log.debug("%s market cap %.0f %s -> %.0f EUR",
+                          row["ticker"], float(cap), cap_ccy, cap_eur)
+            row["market_cap"] = cap_eur
+            row["_dirty"] = True
     if rev and not row.get("annual_revenue_eur"):
-        row["annual_revenue_eur"] = float(rev)     # ponytail: assumes reporting ccy≈EUR
-        row["_dirty"] = True
+        rev_eur = to_eur(float(rev), rev_ccy)
+        if rev_eur is None:
+            log.warning("revenue for %s left unset: no %s->EUR rate",
+                        row["ticker"], rev_ccy)
+        else:
+            if rev_ccy != "EUR":
+                log.debug("%s revenue %.0f %s -> %.0f EUR",
+                          row["ticker"], float(rev), rev_ccy, rev_eur)
+            row["annual_revenue_eur"] = rev_eur
+            row["_dirty"] = True
     return row
 
 
@@ -572,6 +659,23 @@ def init_db() -> None:
     with connect() as con:
         con.executescript(sql)
     log.info("initialised database at %s", DB_PATH)
+
+
+def reset_financials() -> None:
+    """Clear cached market_cap / annual_revenue_eur so the next run refetches them.
+
+    Rows cached before the FX fix hold raw yfinance figures in the stock's own
+    currency. refresh_financials() skips any row that already has both fields, so
+    those stale values would survive the fix forever — run this once after
+    upgrading, for rows that only yfinance filled (a ticker is required).
+    """
+    with connect() as con:
+        cur = con.execute(
+            "UPDATE small_caps_whitelist SET market_cap = NULL, annual_revenue_eur = NULL "
+            "WHERE ticker IS NOT NULL AND ticker != ''")
+        con.commit()
+        log.info("cleared cached financials for %d row(s); the next scan refetches "
+                 "them in EUR", cur.rowcount)
 
 
 def load_whitelist(con) -> list[dict]:
@@ -684,6 +788,7 @@ def resolve_winner(con, winner: str, whitelist: list[dict],
 
 def scan(dry_run: bool = False) -> int:
     session = http_session()
+    check_llm_config()
     with connect() as con:
         ensure_resolution_cache(con)
         whitelist = load_whitelist(con)
@@ -740,9 +845,15 @@ def scan(dry_run: bool = False) -> int:
         if not dry_run:
             con.commit()
         notices_seen = len(notices)
-    if not dry_run:
+    healthy = llm_health_report()
+    # A run whose LLM layer was wholly dead is not a healthy run: withhold the ping
+    # so the dead-man's switch pages instead of reporting a green, alert-less scan.
+    if not dry_run and healthy:
         send_heartbeat(session, notices_seen, alerts)
     log.info("scan complete: %d alert(s) fired", alerts)
+    if not healthy:
+        raise LLMAdapterError(
+            f"LLM adapter failed on all {_LLM_CALLS} call(s) with model {LLM_MODEL!r}")
     return alerts
 
 
@@ -764,6 +875,19 @@ def selftest() -> None:
     assert top_candidate(clean_name("Totally Different Corp"), wl)[1] < FUZZY_THRESHOLD
     assert _parse_json_blob('noise {"same": true} tail') == {"same": True}
     assert _parse_json_blob("no json here") is None
+
+    # Currency codes from yfinance: quotes may be in minor units, financials are not.
+    # A raw DKK/SEK cap left unconverted reads ~7-11x too large and silently fails
+    # the €100M-€2B band — that is what suppressed every non-EUR alert.
+    assert _norm_ccy("GBp") == "GBP" and _norm_ccy("GBX") == "GBP"
+    assert _norm_ccy(None) == "EUR" and _norm_ccy("dkk") == "DKK"
+    _FX_CACHE["DKK"] = 0.134
+    assert abs(to_eur(14_705_406_976, "DKK") - 1.970e9) < 1e7   # in band once converted
+    assert not evaluate({"annual_revenue_eur": 1.144e9, "market_cap": 14.705e9},
+                        value_eur=2.007e9)[0]                   # unconverted cap -> hold
+    assert evaluate({"annual_revenue_eur": 1.144e9, "market_cap": 1.965e9},
+                    value_eur=2.007e9)[0]                       # converted -> fires
+    del _FX_CACHE["DKK"]
 
     # subsidiary -> listed-parent consolidation: needs listed==true AND a ticker
     assert _parent_from_blob({"listed": True, "parent_name": "Siemens Healthineers",
@@ -817,6 +941,9 @@ def main(argv=None) -> int:
     p.add_argument("--dump", type=int, metavar="N", help="print N raw notices and exit")
     p.add_argument("--test-telegram", action="store_true",
                    help="send a canned message to verify Telegram wiring")
+    p.add_argument("--reset-financials", action="store_true",
+                   help="clear cached market cap/revenue so they refetch in EUR "
+                        "(run once after the FX fix)")
     p.add_argument("--selftest", action="store_true", help="run offline logic check")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
@@ -829,6 +956,8 @@ def main(argv=None) -> int:
         selftest(); return 0
     if args.init_db:
         init_db(); return 0
+    if args.reset_financials:
+        reset_financials(); return 0
     if args.dump:
         dump_notices(args.dump); return 0
     if args.test_telegram:
@@ -840,6 +969,10 @@ def main(argv=None) -> int:
     try:
         scan(dry_run=args.dry_run)
         return 0
+    except LLMAdapterError as e:
+        # Already reported in full by llm_health_report(); no traceback needed.
+        log.error("%s — fix TED_LLM_MODEL / NVIDIA_API_KEY in .env", e)
+        return 1
     except Exception:
         log.exception("scan aborted with an unhandled error")
         return 1
