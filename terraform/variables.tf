@@ -68,6 +68,19 @@ variable "ted_llm_model" {
   }
 }
 
+variable "name_prefix" {
+  type        = string
+  default     = "ted-bot"
+  description = "Préfixe des display_name. À changer pour faire cohabiter deux stacks (migration, rebuild)."
+
+  validation {
+    # Sert aussi de dns_label VCN (ponctuation retirée) : doit tenir en 15 car.
+    # alphanumériques et commencer par une lettre.
+    condition     = can(regex("^[a-z][a-z0-9-]*$", var.name_prefix)) && length(replace(var.name_prefix, "-", "")) <= 15
+    error_message = "name_prefix : minuscules/chiffres/tirets, doit commencer par une lettre, et <= 15 caractères une fois les tirets retirés."
+  }
+}
+
 variable "lookback_days" {
   type    = string
   default = "3" # >1 covers weekend publication gaps; dedup makes overlap free

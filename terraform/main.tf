@@ -34,20 +34,20 @@ data "oci_core_images" "ol9" {
 resource "oci_core_vcn" "vcn" {
   compartment_id = var.compartment_ocid
   cidr_blocks    = ["10.0.0.0/16"]
-  display_name   = "ted-bot-vcn"
-  dns_label      = "tedbot"
+  display_name   = "${var.name_prefix}-vcn"
+  dns_label      = replace(var.name_prefix, "-", "")
 }
 
 resource "oci_core_internet_gateway" "igw" {
   compartment_id = var.compartment_ocid
   vcn_id         = oci_core_vcn.vcn.id
-  display_name   = "ted-bot-igw"
+  display_name   = "${var.name_prefix}-igw"
 }
 
 resource "oci_core_route_table" "rt" {
   compartment_id = var.compartment_ocid
   vcn_id         = oci_core_vcn.vcn.id
-  display_name   = "ted-bot-rt"
+  display_name   = "${var.name_prefix}-rt"
   route_rules {
     destination       = "0.0.0.0/0"
     network_entity_id = oci_core_internet_gateway.igw.id
@@ -57,7 +57,7 @@ resource "oci_core_route_table" "rt" {
 resource "oci_core_security_list" "sl" {
   compartment_id = var.compartment_ocid
   vcn_id         = oci_core_vcn.vcn.id
-  display_name   = "ted-bot-sl"
+  display_name   = "${var.name_prefix}-sl"
 
   # Outbound: open (needs TED, Telegram, NVIDIA, PyPI, GitHub).
   egress_security_rules {
@@ -80,7 +80,7 @@ resource "oci_core_subnet" "sn" {
   compartment_id             = var.compartment_ocid
   vcn_id                     = oci_core_vcn.vcn.id
   cidr_block                 = "10.0.1.0/24"
-  display_name               = "ted-bot-subnet"
+  display_name               = "${var.name_prefix}-subnet"
   dns_label                  = "app"
   route_table_id             = oci_core_route_table.rt.id
   security_list_ids          = [oci_core_security_list.sl.id]
@@ -91,7 +91,7 @@ resource "oci_core_subnet" "sn" {
 resource "oci_core_instance" "ted_bot" {
   compartment_id      = var.compartment_ocid
   availability_domain = data.oci_identity_availability_domains.ads.availability_domains[0].name
-  display_name        = "ted-bot"
+  display_name        = var.name_prefix
   shape               = var.shape # E2.1.Micro : shape fixe, pas de shape_config
 
   create_vnic_details {

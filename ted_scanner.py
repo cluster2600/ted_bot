@@ -55,7 +55,12 @@ DB_PATH = os.environ.get("TED_DB", os.path.join(HERE, "ted.db"))
 SCHEMA_PATH = os.path.join(HERE, "schema.sql")
 
 TED_SEARCH_URL = "https://api.ted.europa.eu/v3/notices/search"
-TED_DETAIL_URL = "https://ted.europa.eu/en/notice/{pub}"
+# Notice permalink. "/en/notice/{pub}" is a 404 — the working forms are
+# "/en/notice/-/detail/{pub}" (JS single-page app: 202 + empty body to any
+# non-browser client) and "/en/notice/{pub}/html", which serves the rendered
+# notice directly with a 200. Prefer the latter, and prefer the link the API
+# hands us over any URL we build ourselves.
+TED_DETAIL_URL = "https://ted.europa.eu/en/notice/{pub}/html"
 
 # High-alpha CPV divisions (matched by prefix on the notice CPV codes).
 CPV_CODES = ["72000000", "35000000", "33000000", "09330000"]
@@ -399,7 +404,26 @@ def extract_notice(notice: dict) -> dict:
         "currency": (currency or "EUR").upper(),
         "lots": n_lots,
         "title": _pick_lang(notice.get("notice-title")),
+        "url": _notice_url(notice, pub),
     }
+
+
+def _notice_url(notice: dict, pub) -> str | None:
+    """Permalink for a notice, preferring the one TED publishes in `links`.
+
+    `links` carries xml/pdf/html/htmlDirect, each a language->URL dict. htmlDirect
+    is the server-rendered page; `html` is the SPA route. Falling back to a URL we
+    build ourselves keeps alerts working if `links` ever disappears.
+    """
+    links = notice.get("links")
+    if isinstance(links, dict):
+        for kind in ("htmlDirect", "html"):
+            langs = links.get(kind)
+            if isinstance(langs, dict) and langs:
+                url = langs.get("ENG") or langs.get("MUL") or next(iter(langs.values()))
+                if isinstance(url, str) and url.startswith("http"):
+                    return url
+    return TED_DETAIL_URL.format(pub=pub) if pub else None
 
 
 # --------------------------------------------------------------------------- #
@@ -629,7 +653,7 @@ def format_alert(row, notice, metrics) -> str:
     capr = f"{metrics['cap_ratio'] * 100:.1f}% of market cap" if metrics.get("cap_ratio") else "—"
     lots = notice.get("lots") or 1
     lot_txt = f"{lots} lots" if lots != 1 else "1 lot"
-    link = TED_DETAIL_URL.format(pub=notice["notice_id"])
+    link = notice.get("url") or TED_DETAIL_URL.format(pub=notice["notice_id"])
     title = esc(notice["title"] or "Contract Award Notice")
     company = esc(row["company_name_cleaned"].title())
     ticker = esc(row.get("ticker") or "n/a")
@@ -879,6 +903,14 @@ def selftest() -> None:
     # Currency codes from yfinance: quotes may be in minor units, financials are not.
     # A raw DKK/SEK cap left unconverted reads ~7-11x too large and silently fails
     # the €100M-€2B band — that is what suppressed every non-EUR alert.
+    # Notice permalink: prefer TED's own htmlDirect link; never emit /en/notice/{pub},
+    # which 404s and shipped in every alert until 2026-08-07.
+    assert _notice_url({"links": {"htmlDirect": {"ENG": "https://ted.europa.eu/en/notice/1-2026/html"},
+                                  "html": {"ENG": "https://ted.europa.eu/en/notice/-/detail/1-2026"}}},
+                       "1-2026") == "https://ted.europa.eu/en/notice/1-2026/html"
+    assert _notice_url({}, "1-2026") == "https://ted.europa.eu/en/notice/1-2026/html"
+    assert _notice_url({"links": {}}, None) is None
+
     assert _norm_ccy("GBp") == "GBP" and _norm_ccy("GBX") == "GBP"
     assert _norm_ccy(None) == "EUR" and _norm_ccy("dkk") == "DKK"
     _FX_CACHE["DKK"] = 0.134
