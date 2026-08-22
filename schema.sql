@@ -25,3 +25,28 @@ CREATE TABLE IF NOT EXISTS processed_notices (
     notice_id    TEXT PRIMARY KEY,
     processed_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Alerts successfully delivered to Telegram. Each row is evaluated after
+-- 30 calendar days using adjusted market closes. The observed return is a
+-- monitoring signal, not a causal attribution to the procurement award.
+CREATE TABLE IF NOT EXISTS alerts (
+    notice_id          TEXT PRIMARY KEY,
+    company_name       TEXT NOT NULL,
+    ticker             TEXT,
+    notice_title       TEXT,
+    notice_url         TEXT,
+    contract_value_eur REAL NOT NULL,
+    market_cap_eur     REAL,
+    alerted_at         TEXT NOT NULL,
+    due_at             TEXT NOT NULL,
+    start_price        REAL,
+    start_price_date   TEXT,
+    end_price          REAL,
+    end_price_date     TEXT,
+    return_pct         REAL,
+    evaluated_at       TEXT,
+    evaluation_status  TEXT NOT NULL DEFAULT 'pending',
+    reported_at        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_alerts_due ON alerts(evaluation_status, due_at);

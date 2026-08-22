@@ -1,5 +1,6 @@
 #!/bin/bash
-# Weekly SQLite backup (whitelist + processed_notices). Keeps 4 local snapshots
+# Weekly SQLite backup (whitelist + processed notices + alert evaluations).
+# Keeps 4 local snapshots
 # and, if OCI_BACKUP_BUCKET is set and the oci CLI is present, uploads one copy.
 # cloud-init installs a weekly cron for this. Safe to run by hand any time.
 set -euo pipefail

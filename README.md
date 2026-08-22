@@ -19,7 +19,10 @@ Contract Award Notices from the TED v3 API, filters by high-alpha CPV divisions,
 fuzzy-matches winner names against a local watchlist, sanity-checks financials
 via `yfinance`, and alerts only when both the materiality and market-cap gates
 pass. Every examined notice is written to `processed_notices`, so re-runs are
-idempotent and never double-alert.
+idempotent and never double-alert. A successfully delivered alert is also
+written to `alerts`; 30 calendar days later the bot measures the adjusted share
+price return, regenerates an HTML table plus PNG chart, and sends the graph to
+Telegram.
 
 ```mermaid
 flowchart TD
@@ -35,7 +38,11 @@ flowchart TD
     H --> I{"Materiality ≥ 15%<br/>AND €100M ≤ cap ≤ €2B ?"}
     I -->|no| G
     I -->|yes| J["Telegram Notification API<br/>sendMessage"]
-    J --> G
+    J --> M["record alert + J0 adjusted close"]
+    M --> G
+    M -. "30 calendar days" .-> N["J+30 adjusted close"]
+    N --> O["HTML table + PNG bar chart"]
+    O --> P["Telegram sendPhoto"]
 
     subgraph LOCAL["OCI Always-Free micro instance"]
         B
@@ -192,6 +199,37 @@ NVIDIA_API_KEY=nvapi-...
 
 > `chmod 600 .env` and keep it out of git (add it to `.gitignore`).
 
+### J+30 alert evaluation
+
+The normal daily command evaluates due alerts before starting the new TED scan.
+For each Telegram alert, the bot stores the ticker, contract value, alert time
+and latest adjusted close. At J+30 it uses the first available market close on
+or after the due date; weekends and exchange holidays therefore remain pending
+until a real close exists.
+
+Outputs are written below `reports/` (gitignored):
+
+- `ted-alertes-j30.html` — full table with alert, ticker, contract value, due
+  date, J+30 return and direction;
+- `ted-alertes-j30.png` — colorblind-friendly horizontal bar chart centred on
+  the 0% baseline.
+
+When one or more evaluations become complete, the PNG and a compact table are
+sent to Telegram once. These returns are observations, not proof that the TED
+award caused the share-price move. Alerts emitted before this schema existed
+cannot be backfilled reliably because the previous scanner stored only the
+processed notice identifier.
+
+Operational commands:
+
+```bash
+# Evaluate due alerts, refresh both files, and send new results to Telegram
+python3 ted_scanner.py --evaluate-alerts
+
+# Rebuild the table and chart from SQLite without market or Telegram calls
+python3 ted_scanner.py --evaluation-report
+```
+
 ---
 
 ## What only you can do (accounts & secrets)
@@ -228,7 +266,8 @@ do not enter Terraform state, cloud-init user data, or OCI instance metadata.
 
 - **Log rotation** — `deploy/ted_bot.logrotate` (installed to `/etc/logrotate.d/`).
 - **DB backup** — `deploy/backup.sh` runs weekly (Sun 03:15 UTC), keeps 4 local
-  snapshots, and uploads one to `OCI_BACKUP_BUCKET` if set.
+  snapshots (including alert evaluations), and uploads one to
+  `OCI_BACKUP_BUCKET` if set.
 - **Heartbeat** — `TED_HEARTBEAT_URL` is pinged with `?notices=&alerts=` after each run.
 - **FQDN + TLS** *(only if you expose a service)* — [`docs/dns-tls.md`](docs/dns-tls.md):
   free DuckDNS hostname + Let's Encrypt cert via DNS-01 (no inbound ports).
@@ -241,6 +280,8 @@ do not enter Terraform state, cloud-init user data, or OCI instance metadata.
 | `python3 ted_scanner.py` | daily scan (cron target) |
 | `python3 ted_scanner.py --dry-run -v` | scan and log decisions; send nothing, record nothing |
 | `python3 ted_scanner.py --dump 3` | print raw JSON of 3 notices (field discovery) |
+| `python3 ted_scanner.py --evaluate-alerts` | evaluate due J+30 alerts, rebuild and send the graph |
+| `python3 ted_scanner.py --evaluation-report` | rebuild the local HTML table and PNG without network calls |
 | `python3 ted_scanner.py --reset-financials` | clear cached cap/revenue so they refetch in EUR |
 | `python3 ted_scanner.py --selftest` | offline logic self-check |
 
