@@ -7,7 +7,7 @@ ted.db-shm
 .env
 ted_scanner.log
 
-# Terraform (state holds secrets; tfvars holds credentials)
+# Terraform (tfvars holds provider configuration; state holds infrastructure metadata)
 terraform/.terraform/
 terraform/.terraform.lock.hcl
 *.tfstate

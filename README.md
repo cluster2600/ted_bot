@@ -212,13 +212,17 @@ The code and infra are ready; these need your accounts:
    Review it (yfinance figures are in the stock's reporting currency; materiality
    assumes EUR), then commit `deploy/whitelist.sql` — cloud-init auto-seeds it.
    `annual_revenue_eur` accuracy drives materiality.
-3. **OCI API key** — Console → *My profile → API keys → Add API key*; feed the
-   values into `terraform/terraform.tfvars` (see `terraform/README.md`).
+3. **OCI API key** — use a dedicated, least-privilege OCI deployment identity;
+   feed its values into `terraform/terraform.tfvars` (see `terraform/README.md`).
 4. **`NVIDIA_API_KEY`** *(optional)* — for the Nemotron adapter; get one at
    [build.nvidia.com](https://build.nvidia.com).
 5. **Heartbeat** *(optional but recommended)* — create a check at
    [healthchecks.io](https://healthchecks.io), put its ping URL in `TED_HEARTBEAT_URL`
    so a silently-failed cron pages you.
+
+Application secrets are streamed to `deploy/install-secrets.sh` only after the
+VM is provisioned. They are not accepted as Terraform variables and therefore
+do not enter Terraform state, cloud-init user data, or OCI instance metadata.
 
 ## Operations extras
 

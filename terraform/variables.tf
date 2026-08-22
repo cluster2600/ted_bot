@@ -30,44 +30,6 @@ variable "git_repo_slug" {
   default = "cluster2600/ted_bot"
 }
 
-variable "github_token" {
-  type        = string
-  default     = ""
-  sensitive   = true
-  description = "Fine-grained PAT (contents:read) to clone a PRIVATE repo. Leave empty if public."
-}
-
-variable "telegram_bot_token" {
-  type      = string
-  sensitive = true
-}
-
-variable "telegram_chat_id" {
-  type      = string
-  sensitive = true
-}
-
-variable "nvidia_api_key" {
-  type        = string
-  default     = ""
-  sensitive   = true
-  description = "Optional — clé NVIDIA (Nemotron) pour la couche adapt-in-the-loop. Récupérée depuis OCI Vault."
-}
-
-variable "ted_llm_model" {
-  type        = string
-  default     = "nvidia/nemotron-3-ultra-550b-a55b"
-  description = "Modèle servi par integrate.api.nvidia.com (format vendeur/modèle). Doit rester aligné sur LLM_MODEL dans ted_scanner.py."
-
-  validation {
-    # Un id NVIDIA est toujours "vendeur/modèle" — un nom d'un autre fournisseur
-    # (ex. l'ancien "claude-haiku-4-5") passait silencieusement et faisait échouer
-    # 100 % des appels LLM en production.
-    condition     = can(regex("^[a-z0-9_.-]+/[a-z0-9_.-]+$", var.ted_llm_model))
-    error_message = "ted_llm_model doit être un id NVIDIA de la forme vendeur/modèle, ex. nvidia/nemotron-3-ultra-550b-a55b."
-  }
-}
-
 variable "name_prefix" {
   type        = string
   default     = "ted-bot"
@@ -79,21 +41,4 @@ variable "name_prefix" {
     condition     = can(regex("^[a-z][a-z0-9-]*$", var.name_prefix)) && length(replace(var.name_prefix, "-", "")) <= 15
     error_message = "name_prefix : minuscules/chiffres/tirets, doit commencer par une lettre, et <= 15 caractères une fois les tirets retirés."
   }
-}
-
-variable "lookback_days" {
-  type    = string
-  default = "3" # >1 covers weekend publication gaps; dedup makes overlap free
-}
-
-variable "heartbeat_url" {
-  type        = string
-  default     = ""
-  description = "Optional dead-man's-switch URL (e.g. healthchecks.io) pinged after each run."
-}
-
-variable "oci_backup_bucket" {
-  type        = string
-  default     = ""
-  description = "Optional OCI Object Storage bucket for weekly ted.db backups (needs oci CLI on the box)."
 }

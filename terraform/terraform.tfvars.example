@@ -12,12 +12,9 @@ compartment_ocid = "ocid1.compartment.oc1..aaaa..."   # or the tenancy_ocid for 
 ssh_public_key_path = "~/.ssh/id_ed25519.pub"
 ssh_ingress_cidr    = "1.2.3.4/32"                     # your IP; keep it tight
 
-# --- App ---
-git_repo_slug      = "cluster2600/ted_bot"
-github_token       = "github_pat_..."                  # only if the repo is private
-telegram_bot_token = "123456:ABC-your-token"
-telegram_chat_id   = "987654321"
-nvidia_api_key     = ""                                # optionnel (Nemotron, depuis OCI Vault)
-# ted_llm_model    = "nvidia/nemotron-3-ultra-550b-a55b"  # id NVIDIA "vendeur/modèle" ; laisser par défaut
-heartbeat_url      = ""                                # optional, e.g. https://hc-ping.com/<uuid>
-oci_backup_bucket  = ""                                # optional OCI bucket for db backups
+# --- App source ---
+git_repo_slug = "cluster2600/ted_bot"
+
+# Application secrets are deliberately absent. Stream them after provisioning
+# through deploy/install-secrets.sh so they never enter tfvars, Terraform state,
+# cloud-init user_data, or OCI instance metadata.
