@@ -15,21 +15,24 @@ fi
 
 APP_DIR=${TED_BOT_APP_DIR:-/home/opc/ted_bot}
 APP_USER=${TED_BOT_APP_USER:-opc}
+umask 077
 PAYLOAD=$(mktemp /tmp/ted-bot-secrets.XXXXXX.json)
 ENV_FILE=$(mktemp /tmp/ted-bot-env.XXXXXX)
 trap 'rm -f "$PAYLOAD" "$ENV_FILE"' EXIT
-umask 077
 
 cat > "$PAYLOAD"
 
 python3 - "$PAYLOAD" "$ENV_FILE" <<'PY'
 import json
+import re
 import shlex
 import sys
 
 payload_path, env_path = sys.argv[1:]
 with open(payload_path, encoding="utf-8") as handle:
     payload = json.load(handle)
+if not isinstance(payload, dict):
+    raise SystemExit("payload must be a JSON object")
 
 defaults = {
     "NVIDIA_API_KEY": "",
@@ -45,11 +48,30 @@ unknown = sorted(set(payload) - allowed)
 if unknown:
     raise SystemExit("unsupported application setting(s): " + ", ".join(unknown))
 
-for key in required:
-    if not isinstance(payload.get(key), (str, int)) or not str(payload[key]).strip():
-        raise SystemExit(f"missing required application setting: {key}")
+token = payload.get("TELEGRAM_BOT_TOKEN")
+if not isinstance(token, str) or not token.strip():
+    raise SystemExit("missing required application setting: TELEGRAM_BOT_TOKEN")
+
+chat_id = payload.get("TELEGRAM_CHAT_ID")
+if isinstance(chat_id, bool) or not isinstance(chat_id, (str, int)) or not str(chat_id).strip():
+    raise SystemExit("missing required application setting: TELEGRAM_CHAT_ID")
+
+for key, value in payload.items():
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise SystemExit(f"application setting must be a string or integer: {key}")
 
 settings = {**defaults, **payload}
+model = str(settings["TED_LLM_MODEL"])
+if not re.fullmatch(r"[a-z0-9_.-]+/[a-z0-9_.-]+", model):
+    raise SystemExit("TED_LLM_MODEL must use the vendor/model format")
+
+try:
+    lookback_days = int(str(settings["TED_LOOKBACK_DAYS"]))
+except ValueError as exc:
+    raise SystemExit("TED_LOOKBACK_DAYS must be a positive integer") from exc
+if lookback_days < 1:
+    raise SystemExit("TED_LOOKBACK_DAYS must be a positive integer")
+
 with open(env_path, "w", encoding="utf-8") as handle:
     for key in (*required, *defaults):
         handle.write(f"{key}={shlex.quote(str(settings[key]))}\n")

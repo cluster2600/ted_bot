@@ -12,7 +12,7 @@ provider "oci" {
   tenancy_ocid     = var.tenancy_ocid
   user_ocid        = var.user_ocid
   fingerprint      = var.fingerprint
-  private_key_path = var.private_key_path
+  private_key_path = pathexpand(var.private_key_path)
   region           = var.region
 }
 
@@ -106,7 +106,7 @@ resource "oci_core_instance" "ted_bot" {
   }
 
   metadata = {
-    ssh_authorized_keys = file(var.ssh_public_key_path)
+    ssh_authorized_keys = file(pathexpand(var.ssh_public_key_path))
     user_data = base64encode(templatefile("${path.module}/cloud-init.sh", {
       git_repo_slug = var.git_repo_slug
     }))
