@@ -4,11 +4,14 @@ on: [push, pull_request]
 jobs:
   selftest:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.11"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - run: pip install requests matplotlib  # offline checks include the J+30 chart renderer
       - run: python ted_scanner.py --selftest
       - run: python alert_evaluation.py

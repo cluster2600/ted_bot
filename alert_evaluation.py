@@ -9,7 +9,7 @@ import math
 import sqlite3
 import tempfile
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Optional
 
 
 EVALUATION_DAYS = 30
@@ -18,7 +18,7 @@ CHART_FILENAME = "ted-alertes-j30.png"
 REPORT_FILENAME = "ted-alertes-j30.html"
 
 PricePoint = tuple[dt.date, float]
-PriceFetcher = Callable[[str], PricePoint | None]
+PriceFetcher = Callable[[str], Optional[PricePoint]]
 HistoryLoader = Callable[[str, dt.date, dt.date], list[PricePoint]]
 
 
