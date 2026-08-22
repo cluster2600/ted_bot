@@ -108,15 +108,7 @@ resource "oci_core_instance" "ted_bot" {
   metadata = {
     ssh_authorized_keys = file(var.ssh_public_key_path)
     user_data = base64encode(templatefile("${path.module}/cloud-init.sh", {
-      git_repo_slug      = var.git_repo_slug
-      github_token       = var.github_token
-      telegram_bot_token = var.telegram_bot_token
-      telegram_chat_id   = var.telegram_chat_id
-      nvidia_api_key     = var.nvidia_api_key
-      ted_llm_model      = var.ted_llm_model
-      lookback_days      = var.lookback_days
-      heartbeat_url      = var.heartbeat_url
-      oci_backup_bucket  = var.oci_backup_bucket
+      git_repo_slug = var.git_repo_slug
     }))
   }
 }
