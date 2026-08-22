@@ -6,6 +6,7 @@ ted.db-wal
 ted.db-shm
 .env
 ted_scanner.log
+reports/
 
 # Terraform (tfvars holds provider configuration; state holds infrastructure metadata)
 terraform/.terraform/

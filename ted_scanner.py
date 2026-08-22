@@ -12,12 +12,15 @@ Usage:
     python3 ted_scanner.py                     # daily scan (cron target)
     python3 ted_scanner.py --dry-run           # scan, log decisions, send nothing, record nothing
     python3 ted_scanner.py --dump 3            # print raw JSON of 3 notices (field discovery)
+    python3 ted_scanner.py --evaluate-alerts   # run only due J+30 evaluations
+    python3 ted_scanner.py --evaluation-report # rebuild the local table + graph
     python3 ted_scanner.py --selftest          # offline logic self-check
 
 Env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID  (required to send)
      NVIDIA_API_KEY (optional — enables the Nemotron adapt-in-the-loop layer)
      TED_HEARTBEAT_URL (optional — dead-man's-switch ping after each run)
-     TED_DB (default ./ted.db), TED_LOOKBACK_DAYS (default 1)
+     TED_DB (default ./ted.db), TED_REPORT_DIR (default ./reports)
+     TED_LOOKBACK_DAYS (default 3)
 """
 from __future__ import annotations
 
@@ -31,9 +34,24 @@ import os
 import re
 import sqlite3
 import sys
+from pathlib import Path
 
 import requests
 from requests.adapters import HTTPAdapter
+
+from alert_evaluation import (
+    ensure_schema as ensure_alert_schema,
+    evaluate_due_alerts,
+    latest_close,
+    load_alerts,
+    load_history,
+    mark_reported,
+    record_alert,
+    render_reports,
+    selftest as evaluation_selftest,
+    telegram_caption,
+    unreported_complete,
+)
 
 try:  # urllib3 ships with requests; import defensively across versions
     from urllib3.util.retry import Retry
@@ -53,6 +71,7 @@ except ImportError:  # yfinance is optional at runtime; scan degrades gracefully
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("TED_DB", os.path.join(HERE, "ted.db"))
 SCHEMA_PATH = os.path.join(HERE, "schema.sql")
+REPORT_DIR = os.environ.get("TED_REPORT_DIR", os.path.join(HERE, "reports"))
 
 TED_SEARCH_URL = "https://api.ted.europa.eu/v3/notices/search"
 # Notice permalink. "/en/notice/{pub}" is a 404 — the working forms are
@@ -619,6 +638,30 @@ def send_telegram_alert(text: str, session: requests.Session) -> bool:
     return False
 
 
+def send_telegram_photo(path: str, caption: str, session: requests.Session) -> bool:
+    """Send the J+30 graph with a compact table in its Telegram caption."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat:
+        log.error("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set; cannot send report")
+        return False
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    try:
+        with open(path, "rb") as photo:
+            response = session.post(
+                url,
+                data={"chat_id": chat, "caption": caption, "parse_mode": "HTML"},
+                files={"photo": (os.path.basename(path), photo, "image/png")},
+                timeout=60,
+            )
+        if response.status_code == 200:
+            return True
+        log.error("Telegram report HTTP %d: %s", response.status_code, response.text[:200])
+    except (OSError, requests.RequestException) as error:
+        log.error("Telegram report send failed: %s", error)
+    return False
+
+
 # --------------------------------------------------------------------------- #
 # Decision + alert formatting                                                  #
 # --------------------------------------------------------------------------- #
@@ -729,6 +772,45 @@ def mark_processed(con, notice_id) -> None:
                 (notice_id,))
 
 
+def build_evaluation_report() -> tuple[str, str, list[dict]]:
+    """Regenerate the local HTML table and PNG graph without market/API calls."""
+    with connect() as con:
+        ensure_alert_schema(con)
+        rows = load_alerts(con)
+        con.commit()
+    report, chart = render_reports(rows, Path(REPORT_DIR))
+    log.info("J+30 report: %s (%d alert(s))", report, len(rows))
+    return str(report), str(chart), rows
+
+
+def run_alert_evaluations(*, send_report: bool = True) -> tuple[int, int]:
+    """Evaluate due alerts, refresh the dashboard and send new results once."""
+    session = http_session()
+    with connect() as con:
+        ensure_alert_schema(con)
+        completed = evaluate_due_alerts(
+            con,
+            lambda ticker, start, end: load_history(yf, ticker, start, end),
+        )
+        con.commit()
+        rows = load_alerts(con)
+        report, chart = render_reports(rows, Path(REPORT_DIR))
+        pending_report = unreported_complete(con)
+        sent = 0
+        if send_report and pending_report:
+            if send_telegram_photo(str(chart), telegram_caption(pending_report), session):
+                mark_reported(con, [row["notice_id"] for row in pending_report])
+                con.commit()
+                sent = len(pending_report)
+        log.info(
+            "J+30 evaluation: %d newly complete, %d reported; dashboard=%s",
+            len(completed),
+            sent,
+            report,
+        )
+        return len(completed), sent
+
+
 # Resolution cache: winner_clean -> listed?/ticker. Caches BOTH hits and misses
 # so the LLM is asked about any given winner (mostly private distributors) once,
 # ever. ponytail: created lazily so existing DBs need no migration.
@@ -815,6 +897,7 @@ def scan(dry_run: bool = False) -> int:
     check_llm_config()
     with connect() as con:
         ensure_resolution_cache(con)
+        ensure_alert_schema(con)
         whitelist = load_whitelist(con)
         if not whitelist:
             log.warning("whitelist is empty — LLM resolution still catches listed winners")
@@ -863,6 +946,19 @@ def scan(dry_run: bool = False) -> int:
                         alerts += 1
                     elif send_telegram_alert(msg, session):
                         alerts += 1
+                        record_alert(
+                            con,
+                            row,
+                            info,
+                            metrics,
+                            price_fetcher=(
+                                (lambda ticker: latest_close(yf, ticker)) if yf is not None else None
+                            ),
+                        )
+                        # Persist the successful delivery and its evaluation row together.
+                        # A crash later in the scan must not cause a duplicate alert.
+                        mark_processed(con, nid)
+                        con.commit()
                 break  # one winner match per notice is enough
             if not dry_run:
                 mark_processed(con, nid)
@@ -963,6 +1059,7 @@ def selftest() -> None:
         {"materiality": 0.20, "market_cap": 3e8, "value_eur": 2e6})
     assert "&amp;" in msg and "&lt;svc&gt;" in msg and "<b>" in msg, msg
     assert "<svc>" not in msg, msg
+    evaluation_selftest()
     print("selftest: OK")
 
 
@@ -973,6 +1070,10 @@ def main(argv=None) -> int:
     p.add_argument("--dump", type=int, metavar="N", help="print N raw notices and exit")
     p.add_argument("--test-telegram", action="store_true",
                    help="send a canned message to verify Telegram wiring")
+    p.add_argument("--evaluate-alerts", action="store_true",
+                   help="evaluate alerts due at J+30, rebuild the dashboard and exit")
+    p.add_argument("--evaluation-report", action="store_true",
+                   help="rebuild the local J+30 HTML table and graph without API calls")
     p.add_argument("--reset-financials", action="store_true",
                    help="clear cached market cap/revenue so they refetch in EUR "
                         "(run once after the FX fix)")
@@ -998,7 +1099,19 @@ def main(argv=None) -> int:
             "alerts here at 07:45 UTC.", http_session())
         print("telegram: sent ✔" if ok else "telegram: FAILED (check token/chat_id, see log)")
         return 0 if ok else 1
+    if args.evaluation_report:
+        build_evaluation_report()
+        return 0
+    if args.evaluate_alerts:
+        run_alert_evaluations()
+        return 0
     try:
+        if not args.dry_run:
+            try:
+                run_alert_evaluations()
+            except Exception:
+                # A market-data/report problem must not suppress the core TED scan.
+                log.exception("J+30 evaluation failed; continuing with the daily scan")
         scan(dry_run=args.dry_run)
         return 0
     except LLMAdapterError as e:
