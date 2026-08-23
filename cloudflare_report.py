@@ -303,6 +303,7 @@ def publish_report(
     api_token: str,
     project_name: str = DEFAULT_PROJECT,
     session: Optional[requests.Session] = None,
+    public_session: Optional[requests.Session] = None,
     verify: bool = True,
     sleep: Callable[[float], None] = time.sleep,
 ) -> str:
@@ -318,7 +319,10 @@ def publish_report(
     _deploy(client, safe_account, api_token, project, manifest)
     url = _project_url(project_data, project)
     if verify:
-        _verify(client, url, assets, sleep=sleep)
+        # Keep public propagation checks independent from the API client's
+        # retry adapter. Otherwise each of the 20 bounded checks can itself
+        # expand into several long DNS/HTTP retries.
+        _verify(public_session or requests.Session(), url, assets, sleep=sleep)
     return url
 
 
@@ -412,6 +416,7 @@ def selftest() -> None:
             account_id="a" * 32,
             api_token="not-a-real-token",
             session=fake,
+            public_session=fake,
             sleep=lambda _seconds: None,
         )
         assert url == "https://ted-bot-j30-report.pages.dev"
