@@ -13,6 +13,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Callable, Optional
+from unittest.mock import patch
 
 import requests
 from blake3 import blake3
@@ -415,7 +416,11 @@ def selftest() -> None:
         )
         assert url == "https://ted-bot-j30-report.pages.dev"
         assert len(fake.assets) == 3
-        assert publish_from_environment(directory, session=fake) is None
+        with patch.dict(
+            os.environ,
+            {"CLOUDFLARE_API_TOKEN": "", "CLOUDFLARE_ACCOUNT_ID": ""},
+        ):
+            assert publish_from_environment(directory, session=fake) is None
     print("cloudflare_report selftest: OK")
 
 
