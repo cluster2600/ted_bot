@@ -109,6 +109,8 @@ python3 ted_scanner.py --init-db
 export TELEGRAM_BOT_TOKEN="123456:ABC-your-token"
 export TELEGRAM_CHAT_ID="987654321"
 export NVIDIA_API_KEY="nvapi-..."       # optional — enables the Nemotron adapter
+export CLOUDFLARE_ACCOUNT_ID="32-hex-character-account-id"  # optional report
+export CLOUDFLARE_API_TOKEN="pages-edit-token"               # optional report
 
 # 6. Verify offline logic, then a live no-send dry run
 python3 ted_scanner.py --selftest
@@ -220,6 +222,14 @@ award caused the share-price move. Alerts emitted before this schema existed
 cannot be backfilled reliably because the previous scanner stored only the
 processed notice identifier.
 
+When `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are configured, the
+same daily job also publishes the latest HTML and PNG to the Direct Upload
+Pages project selected by `TED_REPORT_PROJECT` (default:
+`ted-bot-j30-report`). Cloudflare serves it over HTTPS at the project's stable
+`*.pages.dev` FQDN. The static site uses `noindex`, a deny-all `robots.txt`, a
+restrictive Content Security Policy and no client-side script; OCI keeps its
+outbound-only network posture.
+
 Operational commands:
 
 ```bash
@@ -228,6 +238,9 @@ python3 ted_scanner.py --evaluate-alerts
 
 # Rebuild the table and chart from SQLite without market or Telegram calls
 python3 ted_scanner.py --evaluation-report
+
+# Rebuild and immediately publish the current report to Cloudflare Pages
+python3 ted_scanner.py --publish-report
 ```
 
 ---
@@ -257,6 +270,10 @@ The code and infra are ready; these need your accounts:
 5. **Heartbeat** *(optional but recommended)* — create a check at
    [healthchecks.io](https://healthchecks.io), put its ping URL in `TED_HEARTBEAT_URL`
    so a silently-failed cron pages you.
+6. **Remote J+30 report** — use a dedicated API token limited to Cloudflare
+   Pages edits on the selected account. Store `CLOUDFLARE_API_TOKEN`,
+   `CLOUDFLARE_ACCOUNT_ID` and optionally `TED_REPORT_PROJECT` in the approved
+   TED Bot OpenBao application path; never commit them or put them in Terraform.
 
 Application secrets are streamed to `deploy/install-secrets.sh` only after the
 VM is provisioned. They are not accepted as Terraform variables and therefore
@@ -282,6 +299,7 @@ do not enter Terraform state, cloud-init user data, or OCI instance metadata.
 | `python3 ted_scanner.py --dump 3` | print raw JSON of 3 notices (field discovery) |
 | `python3 ted_scanner.py --evaluate-alerts` | evaluate due J+30 alerts, rebuild and send the graph |
 | `python3 ted_scanner.py --evaluation-report` | rebuild the local HTML table and PNG without network calls |
+| `python3 ted_scanner.py --publish-report` | rebuild and publish the report to its Cloudflare Pages FQDN |
 | `python3 ted_scanner.py --reset-financials` | clear cached cap/revenue so they refetch in EUR |
 | `python3 ted_scanner.py --selftest` | offline logic self-check |
 
