@@ -2,3 +2,4 @@
 requests>=2.31        # TED + Telegram + NVIDIA LLM HTTP (retry via bundled urllib3)
 yfinance>=0.2.40      # real-time market cap / revenue / FX fallback
 matplotlib>=3.7,<4    # headless J+30 performance graph rendered for Telegram/report
+blake3>=0.4,<2        # Cloudflare Pages asset hashing for the remote report

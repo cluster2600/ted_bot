@@ -14,11 +14,14 @@ Usage:
     python3 ted_scanner.py --dump 3            # print raw JSON of 3 notices (field discovery)
     python3 ted_scanner.py --evaluate-alerts   # run only due J+30 evaluations
     python3 ted_scanner.py --evaluation-report # rebuild the local table + graph
+    python3 ted_scanner.py --publish-report    # rebuild + publish to Cloudflare Pages
     python3 ted_scanner.py --selftest          # offline logic self-check
 
 Env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID  (required to send)
      NVIDIA_API_KEY (optional — enables the Nemotron adapt-in-the-loop layer)
      TED_HEARTBEAT_URL (optional — dead-man's-switch ping after each run)
+     CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID (optional remote report)
+     TED_REPORT_PROJECT (default ted-bot-j30-report)
      TED_DB (default ./ted.db), TED_REPORT_DIR (default ./reports)
      TED_LOOKBACK_DAYS (default 3)
 """
@@ -51,6 +54,11 @@ from alert_evaluation import (
     selftest as evaluation_selftest,
     telegram_caption,
     unreported_complete,
+)
+from cloudflare_report import (
+    PublishError,
+    publish_from_environment,
+    selftest as cloudflare_report_selftest,
 )
 
 try:  # urllib3 ships with requests; import defensively across versions
@@ -802,6 +810,13 @@ def run_alert_evaluations(*, send_report: bool = True) -> tuple[int, int]:
                 mark_reported(con, [row["notice_id"] for row in pending_report])
                 con.commit()
                 sent = len(pending_report)
+        try:
+            public_url = publish_from_environment(Path(REPORT_DIR), session=session)
+        except PublishError as error:
+            public_url = None
+            log.error("Cloudflare report publication failed: %s", error)
+        if public_url:
+            log.info("J+30 public report: %s", public_url)
         log.info(
             "J+30 evaluation: %d newly complete, %d reported; dashboard=%s",
             len(completed),
@@ -1060,6 +1075,7 @@ def selftest() -> None:
     assert "&amp;" in msg and "&lt;svc&gt;" in msg and "<b>" in msg, msg
     assert "<svc>" not in msg, msg
     evaluation_selftest()
+    cloudflare_report_selftest()
     print("selftest: OK")
 
 
@@ -1074,6 +1090,8 @@ def main(argv=None) -> int:
                    help="evaluate alerts due at J+30, rebuild the dashboard and exit")
     p.add_argument("--evaluation-report", action="store_true",
                    help="rebuild the local J+30 HTML table and graph without API calls")
+    p.add_argument("--publish-report", action="store_true",
+                   help="rebuild and publish the J+30 report to Cloudflare Pages")
     p.add_argument("--reset-financials", action="store_true",
                    help="clear cached market cap/revenue so they refetch in EUR "
                         "(run once after the FX fix)")
@@ -1101,6 +1119,17 @@ def main(argv=None) -> int:
         return 0 if ok else 1
     if args.evaluation_report:
         build_evaluation_report()
+        return 0
+    if args.publish_report:
+        build_evaluation_report()
+        try:
+            url = publish_from_environment(
+                Path(REPORT_DIR), require_config=True, session=http_session()
+            )
+        except PublishError as error:
+            log.error("Cloudflare report publication failed: %s", error)
+            return 1
+        print(f"report: published {url}")
         return 0
     if args.evaluate_alerts:
         run_alert_evaluations()

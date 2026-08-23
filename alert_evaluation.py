@@ -420,6 +420,7 @@ def render_html(rows: list[dict], output: Path, chart_name: str) -> None:
         body_rows.append('<tr><td colspan="7" class="empty">Aucune alerte enregistrée.</td></tr>')
     document = f"""<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<meta name="robots" content="noindex,nofollow">
 <title>TED Bot — évaluation des alertes à J+30</title>
 <style>
 body{{font:15px system-ui,sans-serif;color:#17202a;background:#f5f7fa;margin:0;padding:32px}}
@@ -508,6 +509,7 @@ def selftest() -> None:
         assert report.stat().st_size > 1_000 and chart.stat().st_size > 1_000
         page = report.read_text(encoding="utf-8")
         assert "EXM.PA" in page and "+12.5%" in page and "<table>" in page
+        assert '<meta name="robots" content="noindex,nofollow">' in page
     print("alert_evaluation selftest: OK")
 
 
