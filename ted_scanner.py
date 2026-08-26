@@ -20,6 +20,7 @@ Usage:
 Env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID  (required to send)
      NVIDIA_API_KEY (optional — enables the Nemotron adapt-in-the-loop layer)
      TED_HEARTBEAT_URL (optional — dead-man's-switch ping after each run)
+     TED_DAILY_DIGEST (default 1 — Telegram run summary every day, alerts or not)
      CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID (optional remote report)
      TED_REPORT_PROJECT (default ted-bot-j30-report)
      TED_DB (default ./ted.db), TED_REPORT_DIR (default ./reports)
@@ -719,6 +720,78 @@ def format_alert(row, notice, metrics) -> str:
     )
 
 
+def format_digest(stats: dict) -> str:
+    """Render the end-of-run summary. Sent every day, alerts or not.
+
+    Silence is ambiguous: a quiet TED day and a dead cron look identical from the
+    outside. This message is the positive proof that the scan ran, so it carries
+    the numbers that distinguish "nothing matched" from "nothing was examined".
+    """
+    esc = html.escape
+    status = stats["status"]
+    icon = {"ok": "✅", "degraded": "⚠️", "failed": "\U0001F534"}[status]
+    headline = {"ok": "scan OK",
+                "degraded": "scan OK (LLM dégradé)",
+                "failed": "scan KO — adaptateur LLM mort"}[status]
+    lines = [
+        f"{icon} <b>ted_bot</b> — {headline}",
+        f"<i>{esc(stats['date'])} · {stats['duration_s']:.0f}s</i>",
+        "",
+        f"<b>Notices TED récupérées:</b> {stats['fetched']}",
+        f"<b>Nouvelles examinées:</b> {stats['examined']}"
+        f" <i>(déjà vues: {stats['skipped']})</i>",
+        f"<b>Gagnants cotés identifiés:</b> {stats['matched']}",
+        f"<b>Alertes envoyées:</b> <b>{stats['alerts']}</b>",
+    ]
+    if stats["llm_calls"]:
+        lines.append(f"<b>Appels LLM:</b> {stats['llm_calls']}"
+                     f" <i>({stats['llm_failures']} échec(s))</i>")
+    if status == "failed":
+        lines += ["", f"Tous les appels LLM ont échoué avec le modèle "
+                      f"<code>{esc(stats['llm_model'])}</code>. La récupération de "
+                      f"gagnant et la confirmation des matchs flous n'ont pas tourné: "
+                      f"des alertes peuvent manquer."]
+    elif stats["alerts"] == 0 and stats["examined"] == 0 and stats["fetched"] == 0:
+        lines += ["", "Aucune notice retournée par TED sur la fenêtre de recherche "
+                      "— vérifie l'API si ça se répète."]
+    elif stats["alerts"] == 0:
+        lines += ["", "Rien de matériel aujourd'hui. Le bot a bien tourné."]
+    return "\n".join(lines)
+
+
+def digest_enabled() -> bool:
+    return os.environ.get("TED_DAILY_DIGEST", "1").strip().lower() \
+        not in ("0", "false", "no", "off")
+
+
+def send_daily_digest(stats: dict, session: requests.Session) -> bool:
+    """Push the run summary to Telegram unless TED_DAILY_DIGEST=0."""
+    if not digest_enabled():
+        return False
+    return send_telegram_alert(format_digest(stats), session)
+
+
+def format_crash_digest(error: BaseException) -> str:
+    """Digest for a scan that died before it could count anything."""
+    esc = html.escape
+    when = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return (f"\U0001F534 <b>ted_bot</b> — scan interrompu\n"
+            f"<i>{esc(when)}</i>\n\n"
+            f"Le scan a planté avant de pouvoir examiner les notices:\n"
+            f"<code>{esc(type(error).__name__)}: {esc(str(error)[:400])}</code>\n\n"
+            f"Aucune notice n'a été traitée aujourd'hui.")
+
+
+def send_crash_digest(error: BaseException) -> None:
+    """Best-effort red digest so a crashed run is not a silent morning."""
+    if not digest_enabled():
+        return
+    try:
+        send_telegram_alert(format_crash_digest(error), http_session())
+    except Exception:
+        log.exception("crash digest could not be sent")
+
+
 # --------------------------------------------------------------------------- #
 # Database                                                                     #
 # --------------------------------------------------------------------------- #
@@ -909,6 +982,7 @@ def resolve_winner(con, winner: str, whitelist: list[dict],
 
 def scan(dry_run: bool = False) -> int:
     session = http_session()
+    started = dt.datetime.now(dt.timezone.utc)
     check_llm_config()
     with connect() as con:
         ensure_resolution_cache(con)
@@ -921,11 +995,14 @@ def scan(dry_run: bool = False) -> int:
                  len(notices), len(whitelist))
 
         alerts = 0
+        examined = skipped = matched = 0
         for raw in notices:
             info = extract_notice(raw)
             nid = info["notice_id"]
             if already_processed(con, nid):
+                skipped += 1
                 continue
+            examined += 1
             # Adapt to schema drift: if the heuristics found no winner or no value,
             # let the LLM read them straight from the raw notice.
             if not info["winners"] or info["value"] is None:
@@ -943,6 +1020,7 @@ def scan(dry_run: bool = False) -> int:
                                      allow_cache_write=not dry_run)
                 if not row:
                     continue
+                matched += 1
                 row = refresh_financials(row, session)
                 if row.get("id") and row.pop("_dirty", False) and not dry_run:
                     persist_row(con, row)
@@ -986,6 +1064,26 @@ def scan(dry_run: bool = False) -> int:
     if not dry_run and healthy:
         send_heartbeat(session, notices_seen, alerts)
     log.info("scan complete: %d alert(s) fired", alerts)
+    stats = {
+        "date": started.strftime("%Y-%m-%d %H:%M UTC"),
+        "duration_s": (dt.datetime.now(dt.timezone.utc) - started).total_seconds(),
+        "fetched": notices_seen, "examined": examined, "skipped": skipped,
+        "matched": matched, "alerts": alerts,
+        "llm_calls": _LLM_CALLS, "llm_failures": _LLM_FAILURES,
+        "llm_model": LLM_MODEL,
+        "status": "ok" if healthy and not _LLM_FAILURES
+                  else "degraded" if healthy else "failed",
+    }
+    # The digest goes out even on an unhealthy run — a red summary is the whole
+    # point of a daily report, and it is the only Telegram trace a zero-alert day
+    # leaves. Never let it take the scan down with it.
+    if not dry_run:
+        try:
+            send_daily_digest(stats, session)
+        except Exception:
+            log.exception("daily digest could not be sent")
+    else:
+        log.info("[dry-run] digest would be:\n%s", format_digest(stats))
     if not healthy:
         raise LLMAdapterError(
             f"LLM adapter failed on all {_LLM_CALLS} call(s) with model {LLM_MODEL!r}")
@@ -1074,6 +1172,34 @@ def selftest() -> None:
         {"materiality": 0.20, "market_cap": 3e8, "value_eur": 2e6})
     assert "&amp;" in msg and "&lt;svc&gt;" in msg and "<b>" in msg, msg
     assert "<svc>" not in msg, msg
+
+    # Daily digest: a zero-alert day must still produce a message that proves the
+    # run happened, and a dead LLM layer must read red rather than green.
+    base = {"date": "2026-08-26 07:45 UTC", "duration_s": 42.0, "fetched": 310,
+            "examined": 118, "skipped": 192, "matched": 3, "alerts": 0,
+            "llm_calls": 0, "llm_failures": 0,
+            "llm_model": "nvidia/nemotron-3-ultra-550b-a55b", "status": "ok"}
+    quiet = format_digest(base)
+    assert "✅" in quiet and "310" in quiet and "bien tourné" in quiet, quiet
+    assert "Appels LLM" not in quiet, quiet          # tally hidden when unused
+    dead = format_digest({**base, "status": "failed", "llm_calls": 9,
+                          "llm_failures": 9})
+    assert "\U0001F534" in dead and "9" in dead and "manquer" in dead, dead
+    assert "bien tourné" not in dead, dead
+    degraded = format_digest({**base, "status": "degraded", "llm_calls": 9,
+                              "llm_failures": 2})
+    assert "⚠️" in degraded and "dégradé" in degraded, degraded
+    empty = format_digest({**base, "fetched": 0, "examined": 0, "skipped": 0,
+                           "matched": 0})
+    assert "Aucune notice retournée" in empty, empty
+    # digests carry TED/LLM text too: escape it or Telegram 400s and the day goes dark
+    hostile = format_digest({**base, "status": "failed", "llm_calls": 1,
+                             "llm_failures": 1, "llm_model": "a<b>&c"})
+    assert "a&lt;b&gt;&amp;c" in hostile, hostile
+    crash = format_crash_digest(RuntimeError("TED API 503 <down> & out"))
+    assert "RuntimeError" in crash and "&lt;down&gt;" in crash, crash
+    assert "<down>" not in crash, crash
+
     evaluation_selftest()
     cloudflare_report_selftest()
     print("selftest: OK")
@@ -1145,7 +1271,15 @@ def main(argv=None) -> int:
         return 0
     except LLMAdapterError as e:
         # Already reported in full by llm_health_report(); no traceback needed.
+        # scan() has already sent its own red digest, so don't double-report.
         log.error("%s — fix TED_LLM_MODEL / NVIDIA_API_KEY in .env", e)
+        return 1
+    except Exception as e:
+        # TED API down, DB locked, network gone: the scan never got to its digest,
+        # so send one here. A crashed run must still produce a morning message.
+        log.exception("scan failed")
+        if not args.dry_run:
+            send_crash_digest(e)
         return 1
     except Exception:
         log.exception("scan aborted with an unhandled error")

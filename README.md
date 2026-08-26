@@ -43,6 +43,7 @@ flowchart TD
     M -. "30 calendar days" .-> N["J+30 adjusted close"]
     N --> O["HTML table + PNG bar chart"]
     O --> P["Telegram sendPhoto"]
+    G --> Q["end of run: daily digest<br/>counts + LLM health → Telegram<br/>(sent even with 0 alerts)"]
 
     subgraph LOCAL["OCI Always-Free micro instance"]
         B
@@ -243,6 +244,37 @@ python3 ted_scanner.py --evaluation-report
 python3 ted_scanner.py --publish-report
 ```
 
+### Daily digest — proof the bot worked
+
+Alerts are rare by design, so an alert-less morning used to look exactly like a
+dead cron: nothing arrives either way. Every real run therefore closes with one
+short Telegram summary, **whether or not anything fired**:
+
+```
+✅ ted_bot — scan OK
+2026-08-27 07:45 UTC · 51s
+
+Notices TED récupérées: 312
+Nouvelles examinées: 118 (déjà vues: 194)
+Gagnants cotés identifiés: 3
+Alertes envoyées: 0
+Appels LLM: 14 (0 échec(s))
+
+Rien de matériel aujourd'hui. Le bot a bien tourné.
+```
+
+The counts are what separate "quiet day" from "broken day": `0` fetched means
+the TED query returned nothing, `0` examined with a high skip count means the
+lookback window held no new notices, and a red header means the LLM adapter
+failed on every call (winner recovery and fuzzy-match confirmation were skipped,
+so alerts may be missing). If the scan crashes before it can count anything —
+TED API down, DB locked — a red crash digest carrying the exception is sent
+instead. Set `TED_DAILY_DIGEST=0` to silence it and keep alert-only behaviour.
+
+> The digest cannot report a run that never started. Pair it with
+> `TED_HEARTBEAT_URL` (§ *What only you can do*, item 5): the digest proves the
+> bot worked, healthchecks.io catches the morning it doesn't boot at all.
+
 ---
 
 ## What only you can do (accounts & secrets)
@@ -286,6 +318,7 @@ do not enter Terraform state, cloud-init user data, or OCI instance metadata.
   snapshots (including alert evaluations), and uploads one to
   `OCI_BACKUP_BUCKET` if set.
 - **Heartbeat** — `TED_HEARTBEAT_URL` is pinged with `?notices=&alerts=` after each run.
+- **Daily digest** — one Telegram summary per run, alerts or not; `TED_DAILY_DIGEST=0` disables it.
 - **FQDN + TLS** *(only if you expose a service)* — [`docs/dns-tls.md`](docs/dns-tls.md):
   free DuckDNS hostname + Let's Encrypt cert via DNS-01 (no inbound ports).
 
