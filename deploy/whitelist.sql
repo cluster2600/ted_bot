@@ -26,7 +26,7 @@ INSERT OR IGNORE INTO small_caps_whitelist (company_name_cleaned, ticker, exchan
 ('revenio',                   'REG1V.HE',  'Nasdaq Helsinki'),
 ('surgical science',          'SUS.ST',    'Nasdaq Stockholm'),
 ('vitrolife',                 'VITR.ST',   'Nasdaq Stockholm'),
-('biotage',                   'BIOT.ST',   'Nasdaq Stockholm'),
+-- ('biotage',                'BIOT.ST',   'Nasdaq Stockholm'),  -- plus aucune donnée Yahoo (2026-08-27)
 ('cellavision',               'CEVI.ST',   'Nasdaq Stockholm'),
 ('boule diagnostics',         'BOUL.ST',   'Nasdaq Stockholm'),
 ('xvivo perfusion',           'XVIVO.ST',  'Nasdaq Stockholm'),
@@ -50,13 +50,13 @@ INSERT OR IGNORE INTO small_caps_whitelist (company_name_cleaned, ticker, exchan
 ('netcompany',                'NETC.CO',   'Nasdaq Copenhagen'),
 ('addnode',                   'ANOD-B.ST', 'Nasdaq Stockholm'),
 ('knowit',                    'KNOW.ST',   'Nasdaq Stockholm'),
-('formpipe software',         'FPIP.ST',   'Nasdaq Stockholm'),
+-- ('formpipe software',      'FPIP.ST',   'Nasdaq Stockholm'),  -- plus aucune donnée Yahoo ; le nom réapparaît sous « Lasernet Group AB » (2026-08-27)
 ('vitec software',            'VIT-B.ST',  'Nasdaq Stockholm'),
 ('enea',                      'ENEA.ST',   'Nasdaq Stockholm'),
 ('lime technologies',         'LIME.ST',   'Nasdaq Stockholm'),
 ('gofore',                    'GOFORE.HE', 'Nasdaq Helsinki'),
 ('siili solutions',           'SIILI.HE',  'Nasdaq Helsinki'),
-('innofactor',                'IFA1V.HE',  'Nasdaq Helsinki'),
+-- ('innofactor',             'IFA1V.HE',  'Nasdaq Helsinki'),  -- plus aucune donnée Yahoo ; ne subsiste qu'en ligne LSE non sponsorisée (2026-08-27)
 ('digia',                     'DIGIA.HE',  'Nasdaq Helsinki'),
 ('init',                      'IXX.DE',    'Xetra'),
 ('gft technologies',          'GFT.DE',    'Xetra'),
@@ -66,11 +66,11 @@ INSERT OR IGNORE INTO small_caps_whitelist (company_name_cleaned, ticker, exchan
 ('nagarro',                   'NA9.DE',    'Xetra'),
 ('snp schneider neureither',  'SHF.DE',    'Xetra'),
 ('wallix',                    'ALLIX.PA',  'Euronext Paris'),
-('esker',                     'ALESK.PA',  'Euronext Paris'),
+-- ('esker',                  'ALESK.PA',  'Euronext Paris'),  -- plus aucune donnée Yahoo (2026-08-27)
 ('neurones',                  'NRO.PA',    'Euronext Paris'),
 ('aubay',                     'AUB.PA',    'Euronext Paris'),
 ('infotel',                   'INF.PA',    'Euronext Paris'),
-('sii',                       'SII.PA',    'Euronext Paris'),
+-- ('sii',                    'SII.PA',    'Euronext Paris'),  -- plus aucune donnée Yahoo (2026-08-27)
 ('sword',                     'SWP.PA',    'Euronext Paris'),
 ('kainos',                    'KNOS.L',    'LSE'),
 ('bytes technology',          'BYIT.L',    'LSE'),
@@ -84,7 +84,10 @@ INSERT OR IGNORE INTO small_caps_whitelist (company_name_cleaned, ticker, exchan
 ('solaria',                   'SLR.MC',    'BME Madrid'),
 ('alfen',                     'ALFEN.AS',  'Euronext Amsterdam'),
 ('sfc energy',                'F3C.DE',    'Xetra'),
-('sma solar technology',      'S92.DE',    'Xetra'),
+-- Frankfurt, not Xetra: Yahoo resolves S92.DE by name but serves no marketCap on
+-- that line, so the €100M-€2B gate saw cap=None and dropped every SMA award.
+-- S92.F carries the figure (~€1.9B, in band). Verified 2026-08-27.
+('sma solar technology',      'S92.F',     'Frankfurt'),
 ('energiekontor',             'EKT.DE',    'Xetra'),
 ('2g energy',                 '2GB.DE',    'Xetra'),
 ('pne',                       'PNE3.DE',   'Xetra'),
