@@ -743,6 +743,12 @@ def format_digest(stats: dict) -> str:
         f"<b>Gagnants cotés identifiés:</b> {stats['matched']}",
         f"<b>Alertes envoyées:</b> <b>{stats['alerts']}</b>",
     ]
+    # A candidate dropped for want of a market cap was never judged on merit —
+    # that is a broken symbol, not a quiet day, and it stays invisible unless
+    # the digest says it. Only shown when it actually happened.
+    if stats.get("no_market_data"):
+        lines.append(f"⚠️ <b>Écartés faute de données marché:</b> "
+                     f"{stats['no_market_data']} <i>(ticker à vérifier)</i>")
     if stats["llm_calls"]:
         lines.append(f"<b>Appels LLM:</b> {stats['llm_calls']}"
                      f" <i>({stats['llm_failures']} échec(s))</i>")
@@ -754,6 +760,12 @@ def format_digest(stats: dict) -> str:
     elif stats["alerts"] == 0 and stats["examined"] == 0 and stats["fetched"] == 0:
         lines += ["", "Aucune notice retournée par TED sur la fenêtre de recherche "
                       "— vérifie l'API si ça se répète."]
+    elif stats["alerts"] == 0 and stats.get("no_market_data"):
+        # Do not report an all-clear over candidates that were never judged.
+        lines += ["", f"Aucune alerte, mais {stats['no_market_data']} candidat(s) "
+                      f"n'ont pas pu être évalués faute de capitalisation: leur "
+                      f"symbole ne renvoie rien. Vérifie les tickers signalés en "
+                      f"WARNING dans le log."]
     elif stats["alerts"] == 0:
         lines += ["", "Rien de matériel aujourd'hui. Le bot a bien tourné."]
     return "\n".join(lines)
@@ -918,6 +930,18 @@ def resolution_get(con, winner_clean):
     return dict(r) if r else None
 
 
+def resolution_forget(con, winner_clean) -> None:
+    """Drop a cached resolution so the next run resolves this winner again.
+
+    The cache is deliberately permanent (one LLM call per winner, ever), which
+    also makes a hallucinated ticker permanent: the LLM answered 'SYN.WA' for
+    Synektik, whose real symbol is SNT.WA, and every later award by that winner
+    priced at cap=None and was silently held. Forgetting the entry when its
+    ticker yields no market data is what makes the cache self-healing.
+    """
+    con.execute("DELETE FROM resolved_entities WHERE winner_clean=?", (winner_clean,))
+
+
 def resolution_put(con, winner_clean, parent) -> None:
     """Cache a resolution. parent=None marks a confirmed non-listed winner."""
     con.execute(
@@ -974,7 +998,9 @@ def resolve_winner(con, winner: str, whitelist: list[dict],
             return None
         log.info("LLM resolved '%s' -> listed parent %s (%s)", winner,
                  parent["parent_name"], parent["ticker"])
-    return {"id": None,
+    # _winner_clean lets the caller invalidate this cache entry if the ticker
+    # turns out to carry no market data (see resolution_forget).
+    return {"id": None, "_winner_clean": wc,
             "company_name_cleaned": clean_name(parent["parent_name"] or winner) or wc,
             "ticker": parent["ticker"], "exchange": parent["exchange"],
             "market_cap": None, "annual_revenue_eur": None}
@@ -995,7 +1021,7 @@ def scan(dry_run: bool = False) -> int:
                  len(notices), len(whitelist))
 
         alerts = 0
-        examined = skipped = matched = 0
+        examined = skipped = matched = no_market_data = 0
         for raw in notices:
             info = extract_notice(raw)
             nid = info["notice_id"]
@@ -1022,6 +1048,19 @@ def scan(dry_run: bool = False) -> int:
                     continue
                 matched += 1
                 row = refresh_financials(row, session)
+                if row.get("market_cap") is None:
+                    # The €100M-€2B gate cannot pass without a cap, so this
+                    # candidate is dropped on missing data rather than on merit.
+                    # It used to vanish into one log line among hundreds; count
+                    # it so the daily digest can say so out loud.
+                    no_market_data += 1
+                    log.warning("no market data for %r (ticker %s) — candidate "
+                                "dropped; verify the symbol",
+                                winner, row.get("ticker") or "none")
+                    if row.get("id") is None and row.get("_winner_clean") and not dry_run:
+                        # LLM-resolved: forget it so a later run can resolve it
+                        # again instead of re-using a symbol that yields nothing.
+                        resolution_forget(con, row["_winner_clean"])
                 if row.get("id") and row.pop("_dirty", False) and not dry_run:
                     persist_row(con, row)
                 value_eur = to_eur(info["value"], info["currency"])
@@ -1068,7 +1107,7 @@ def scan(dry_run: bool = False) -> int:
         "date": started.strftime("%Y-%m-%d %H:%M UTC"),
         "duration_s": (dt.datetime.now(dt.timezone.utc) - started).total_seconds(),
         "fetched": notices_seen, "examined": examined, "skipped": skipped,
-        "matched": matched, "alerts": alerts,
+        "matched": matched, "alerts": alerts, "no_market_data": no_market_data,
         "llm_calls": _LLM_CALLS, "llm_failures": _LLM_FAILURES,
         "llm_model": LLM_MODEL,
         "status": "ok" if healthy and not _LLM_FAILURES
@@ -1177,7 +1216,7 @@ def selftest() -> None:
     # run happened, and a dead LLM layer must read red rather than green.
     base = {"date": "2026-08-26 07:45 UTC", "duration_s": 42.0, "fetched": 310,
             "examined": 118, "skipped": 192, "matched": 3, "alerts": 0,
-            "llm_calls": 0, "llm_failures": 0,
+            "no_market_data": 0, "llm_calls": 0, "llm_failures": 0,
             "llm_model": "nvidia/nemotron-3-ultra-550b-a55b", "status": "ok"}
     quiet = format_digest(base)
     assert "✅" in quiet and "310" in quiet and "bien tourné" in quiet, quiet
@@ -1199,6 +1238,31 @@ def selftest() -> None:
     crash = format_crash_digest(RuntimeError("TED API 503 <down> & out"))
     assert "RuntimeError" in crash and "&lt;down&gt;" in crash, crash
     assert "<down>" not in crash, crash
+
+    # A candidate dropped for a dead ticker was never judged on merit, so the
+    # digest must surface it and must NOT report the usual all-clear. This is the
+    # Synektik case: the LLM answered SYN.WA, the real symbol is SNT.WA, and the
+    # award priced at cap=None and was held in silence.
+    assert "Écartés faute de données" not in quiet, quiet   # hidden at zero
+    blind = format_digest({**base, "no_market_data": 2})
+    assert "Écartés faute de données marché:</b> 2" in blind, blind
+    assert "bien tourné" not in blind, blind
+    assert "faute de capitalisation" in blind, blind
+
+    # resolution_forget must clear exactly the poisoned winner, so the next run
+    # re-resolves it instead of re-using a symbol that yields nothing.
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    ensure_resolution_cache(con)
+    resolution_put(con, "synektik", {"parent_name": "Synektik", "ticker": "SYN.WA",
+                                     "exchange": "GPW"})
+    resolution_put(con, "netcompany", {"parent_name": "Netcompany", "ticker": "NETC.CO",
+                                       "exchange": "Copenhagen"})
+    assert resolution_get(con, "synektik")["ticker"] == "SYN.WA"
+    resolution_forget(con, "synektik")
+    assert resolution_get(con, "synektik") is None            # re-resolved next run
+    assert resolution_get(con, "netcompany")["ticker"] == "NETC.CO"   # untouched
+    con.close()
 
     evaluation_selftest()
     cloudflare_report_selftest()

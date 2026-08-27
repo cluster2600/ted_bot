@@ -271,6 +271,13 @@ so alerts may be missing). If the scan crashes before it can count anything —
 TED API down, DB locked — a red crash digest carrying the exception is sent
 instead. Set `TED_DAILY_DIGEST=0` to silence it and keep alert-only behaviour.
 
+A candidate whose ticker returns no market cap is dropped by the €100M–€2B gate
+without ever being judged on merit, so the digest calls that out separately
+(`⚠️ Écartés faute de données marché`) instead of reporting an all-clear. When
+the winner came from LLM resolution, its cache entry is also **forgotten**, so a
+later run resolves it again rather than re-using a symbol that yields nothing —
+see § *Winner resolution cache* below.
+
 > The digest cannot report a run that never started. Pair it with
 > `TED_HEARTBEAT_URL` (§ *What only you can do*, item 5): the digest proves the
 > bot worked, healthchecks.io catches the morning it doesn't boot at all.
@@ -310,6 +317,30 @@ The code and infra are ready; these need your accounts:
 Application secrets are streamed to `deploy/install-secrets.sh` only after the
 VM is provisioned. They are not accepted as Terraform variables and therefore
 do not enter Terraform state, cloud-init user data, or OCI instance metadata.
+
+## Winner resolution cache
+
+Off-whitelist winners are consolidated to their listed parent by the LLM and
+cached in `resolved_entities`, hit **and** miss, so any given winner costs at
+most one LLM call ever. That permanence is the point — and it was also the trap:
+the model answered `SYN.WA` for Synektik (the real symbol is `SNT.WA`), the row
+was cached, and from then on every Synektik award priced at `cap=None` and was
+held in silence. No retry was ever possible.
+
+A cached resolution whose ticker yields no market data is now **forgotten** at
+the end of that candidate's evaluation, so the next run resolves it afresh. To
+audit or purge the cache by hand:
+
+```bash
+sqlite3 ted.db "SELECT winner_clean, parent_name, ticker FROM resolved_entities WHERE listed=1;"
+sqlite3 ted.db "DELETE FROM resolved_entities WHERE ticker IN ('SYN.WA','SNY.PA','ACE.WA');"
+```
+
+Ticker symbols are worth auditing periodically for a second reason: European
+small-caps get taken private, and a delisted name simply stops returning data.
+As of 2026-08-27, Biotage, Esker, SII, Formpipe and Innofactor had gone dark on
+Yahoo and were commented out of `deploy/whitelist.sql`; SMA Solar moved from
+`S92.DE` (name resolves, no `marketCap`) to `S92.F`, which carries the figure.
 
 ## Operations extras
 
