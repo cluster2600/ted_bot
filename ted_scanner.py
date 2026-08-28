@@ -826,6 +826,20 @@ def run_alert_evaluations(*, send_report: bool = True) -> tuple[int, int]:
         return len(completed), sent
 
 
+def run_daily(*, dry_run: bool = False) -> int:
+    """Run the scan before refreshing the dashboard with newly recorded alerts."""
+    alerts = scan(dry_run=dry_run)
+    if dry_run:
+        return alerts
+    try:
+        run_alert_evaluations()
+    except Exception:
+        # A market-data/report problem must not turn a successful TED scan into
+        # a failed run or cause successfully delivered alerts to be duplicated.
+        log.exception("daily scan completed; J+30 dashboard refresh failed")
+    return alerts
+
+
 # Resolution cache: winner_clean -> listed?/ticker. Caches BOTH hits and misses
 # so the LLM is asked about any given winner (mostly private distributors) once,
 # ever. ponytail: created lazily so existing DBs need no migration.
@@ -1076,6 +1090,25 @@ def selftest() -> None:
     assert "<svc>" not in msg, msg
     evaluation_selftest()
     cloudflare_report_selftest()
+
+    # The dashboard must be rebuilt after the scan so an alert delivered during
+    # this run appears immediately. Dry runs must remain side-effect free.
+    events = []
+    original_scan = globals()["scan"]
+    original_evaluations = globals()["run_alert_evaluations"]
+    try:
+        globals()["scan"] = lambda *, dry_run=False: events.append(
+            ("scan", dry_run)
+        ) or 1
+        globals()["run_alert_evaluations"] = lambda: events.append(("dashboard", False))
+        assert run_daily() == 1
+        assert events == [("scan", False), ("dashboard", False)], events
+        events.clear()
+        assert run_daily(dry_run=True) == 1
+        assert events == [("scan", True)], events
+    finally:
+        globals()["scan"] = original_scan
+        globals()["run_alert_evaluations"] = original_evaluations
     print("selftest: OK")
 
 
@@ -1135,13 +1168,7 @@ def main(argv=None) -> int:
         run_alert_evaluations()
         return 0
     try:
-        if not args.dry_run:
-            try:
-                run_alert_evaluations()
-            except Exception:
-                # A market-data/report problem must not suppress the core TED scan.
-                log.exception("J+30 evaluation failed; continuing with the daily scan")
-        scan(dry_run=args.dry_run)
+        run_daily(dry_run=args.dry_run)
         return 0
     except LLMAdapterError as e:
         # Already reported in full by llm_health_report(); no traceback needed.
