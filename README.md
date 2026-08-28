@@ -204,7 +204,8 @@ NVIDIA_API_KEY=nvapi-...
 
 ### J+30 alert evaluation
 
-The normal daily command evaluates due alerts before starting the new TED scan.
+The normal daily command runs the TED scan first, then evaluates due alerts and
+publishes the dashboard so alerts delivered during that run appear immediately.
 For each Telegram alert, the bot stores the ticker, contract value, alert time
 and latest adjusted close. At J+30 it uses the first available market close on
 or after the due date; weekends and exchange holidays therefore remain pending
