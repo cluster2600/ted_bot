@@ -213,10 +213,12 @@ until a real close exists.
 
 Outputs are written below `reports/` (gitignored):
 
-- `ted-alertes-j30.html` — full table with alert, ticker, contract value, due
-  date, J+30 return and direction;
-- `ted-alertes-j30.png` — colorblind-friendly horizontal bar chart centred on
-  the 0% baseline.
+- `ted-alertes-j30.html` — dashboard with signal count, cumulative contract
+  value, contract-to-market-cap intensity, J+30 progress and the full alert
+  pipeline;
+- `ted-alertes-j30.png` — horizontal comparison of published contract values
+  while all alerts are pending, then a colorblind-friendly J+30 return chart
+  once evaluations are available.
 
 When one or more evaluations become complete, the PNG and a compact table are
 sent to Telegram once. These returns are observations, not proof that the TED
