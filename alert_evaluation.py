@@ -20,6 +20,11 @@ REPORT_FILENAME = "ted-alertes-j30.html"
 PricePoint = tuple[dt.date, float]
 PriceFetcher = Callable[[str], Optional[PricePoint]]
 HistoryLoader = Callable[[str, dt.date, dt.date], list[PricePoint]]
+BENCHMARKS = {
+    ".PA": ("^FCHI", "CAC 40"),
+    ".ST": ("^OMX", "OMX Stockholm"),
+}
+US_BENCHMARK = ("^RUT", "Russell 2000")
 
 
 def utc_now() -> dt.datetime:
@@ -268,36 +273,69 @@ def load_alerts(con: sqlite3.Connection) -> list[dict]:
     ]
 
 
+def benchmark_for_ticker(ticker: str) -> tuple[str, str] | None:
+    for suffix, benchmark in BENCHMARKS.items():
+        if ticker.endswith(suffix):
+            return benchmark
+    return US_BENCHMARK if "." not in ticker else None
+
+
 def with_current_returns(
     rows: list[dict],
     history_loader: HistoryLoader,
     *,
     now: dt.datetime | None = None,
 ) -> list[dict]:
-    """Add transient mark-to-market returns to pending alerts."""
+    """Add transient mark-to-market and benchmark-relative returns."""
     today = (now or utc_now()).date()
     enriched = [dict(row) for row in rows]
     for row in enriched:
-        if row.get("evaluation_status") != "pending" or not row.get("ticker"):
+        ticker = row.get("ticker")
+        if not ticker:
             continue
         alert_date = parse_utc(row["alerted_at"]).date()
+        target_date = today
+        performance = row.get("return_pct")
+        if performance is None and row.get("evaluation_status") == "pending":
+            try:
+                points = history_loader(
+                    ticker,
+                    alert_date - dt.timedelta(days=7),
+                    today + dt.timedelta(days=1),
+                )
+            except Exception:
+                points = []
+            starts = [point for point in points if point[0] <= alert_date]
+            current = [point for point in points if point[0] <= today]
+            start = starts[-1] if starts else None
+            if start is None and row.get("start_price") and row.get("start_price_date"):
+                start = (dt.date.fromisoformat(row["start_price_date"]), float(row["start_price"]))
+            if start and current:
+                performance = current[-1][1] / start[1] - 1.0
+                row["current_return_pct"] = performance
+                row["current_price_date"] = current[-1][0].isoformat()
+        elif performance is not None and row.get("end_price_date"):
+            target_date = dt.date.fromisoformat(row["end_price_date"])
+        benchmark = benchmark_for_ticker(ticker)
+        if performance is None or benchmark is None:
+            continue
+        symbol, label = benchmark
         try:
-            points = history_loader(
-                row["ticker"],
+            benchmark_points = history_loader(
+                symbol,
                 alert_date - dt.timedelta(days=7),
-                today + dt.timedelta(days=1),
+                target_date + dt.timedelta(days=1),
             )
         except Exception:
             continue
-        starts = [point for point in points if point[0] <= alert_date]
-        current = [point for point in points if point[0] <= today]
-        start = starts[-1] if starts else None
-        if start is None and row.get("start_price") and row.get("start_price_date"):
-            start = (dt.date.fromisoformat(row["start_price_date"]), float(row["start_price"]))
-        if not start or not current:
+        benchmark_starts = [point for point in benchmark_points if point[0] <= alert_date]
+        benchmark_ends = [point for point in benchmark_points if point[0] <= target_date]
+        if not benchmark_starts or not benchmark_ends:
             continue
-        row["current_return_pct"] = current[-1][1] / start[1] - 1.0
-        row["current_price_date"] = current[-1][0].isoformat()
+        benchmark_return = benchmark_ends[-1][1] / benchmark_starts[-1][1] - 1.0
+        row["benchmark_label"] = label
+        row["benchmark_return_pct"] = benchmark_return
+        row["excess_return_pct"] = float(performance) - benchmark_return
     return enriched
 
 
@@ -536,6 +574,14 @@ def render_html(
         else:
             performance_note = "Cours indisponible"
             reading = "En attente"
+        excess = row.get("excess_return_pct")
+        benchmark_label = row.get("benchmark_label")
+        if excess is None or not benchmark_label:
+            benchmark_note = "Indice indisponible"
+            benchmark_css = "pending"
+        else:
+            benchmark_note = f"{excess * 100:+.1f} pts vs {benchmark_label}"
+            benchmark_css = "up" if excess > 0 else "down" if excess < 0 else "flat"
         css_class = "pending"
         if performance is not None:
             css_class = "up" if performance * 100 > STABLE_BAND_PCT else (
@@ -560,7 +606,8 @@ def render_html(
             f"<td><strong>{due_date.isoformat()}</strong><span>{html.escape(tracking_label)}</span>"
             f"<div class=progress aria-label=\"Progression {progress}%\"><i style=\"width:{progress}%\"></i></div></td>"
             f"<td class=\"{css_class}\"><strong>{performance_text}</strong>"
-            f"<span>{html.escape(performance_note)}</span></td>"
+            f"<span>{html.escape(performance_note)}</span>"
+            f"<span class=\"{benchmark_css}\">{html.escape(benchmark_note)}</span></td>"
             f"<td><span class=badge>{reading}</span></td>"
             "</tr>"
         )
@@ -580,7 +627,7 @@ def render_html(
     )
     chart_note = (
         "Les valeurs « en cours » sont provisoires et actualisées au dernier cours disponible. "
-        "La mesure devient finale à J+30."
+        "L’écart vs indice sépare la performance du titre de celle de son marché de référence."
         if has_provisional else
         "Le graphique affiche les rendements ajustés définitifs à J+30."
         if evaluated else
@@ -729,15 +776,26 @@ def selftest() -> None:
         assert "J+5 · encore 25 j" in pending_page
         assert "Contrat / cap.\u00a0: 20,0%" in pending_page
 
+        def live_history(symbol, _start, _end):
+            return {
+                "PND.PA": [
+                    (dt.date(2026, 1, 2), 100.0),
+                    (dt.date(2026, 1, 6), 108.0),
+                ],
+                "^FCHI": [
+                    (dt.date(2026, 1, 2), 200.0),
+                    (dt.date(2026, 1, 6), 204.0),
+                ],
+            }[symbol]
+
         live_rows = with_current_returns(
             pending_rows,
-            lambda _ticker, _start, _end: [
-                (dt.date(2026, 1, 2), 100.0),
-                (dt.date(2026, 1, 6), 108.0),
-            ],
+            live_history,
             now=dt.datetime(2026, 1, 7, 8, tzinfo=dt.timezone.utc),
         )
         assert abs(live_rows[0]["current_return_pct"] - 0.08) < 1e-9
+        assert abs(live_rows[0]["benchmark_return_pct"] - 0.02) < 1e-9
+        assert abs(live_rows[0]["excess_return_pct"] - 0.06) < 1e-9
         live_report, _ = render_reports(
             live_rows,
             Path(raw_temp) / "live",
@@ -745,6 +803,7 @@ def selftest() -> None:
         )
         live_page = live_report.read_text(encoding="utf-8")
         assert "+8.0%" in live_page and "Provisoire au 2026-01-06" in live_page
+        assert "+6.0 pts vs CAC 40" in live_page
         assert "Performance actuelle des alertes" in live_page
     print("alert_evaluation selftest: OK")
 
