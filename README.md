@@ -214,11 +214,10 @@ until a real close exists.
 Outputs are written below `reports/` (gitignored):
 
 - `ted-alertes-j30.html` — dashboard with signal count, cumulative contract
-  value, contract-to-market-cap intensity, J+30 progress and the full alert
-  pipeline;
-- `ted-alertes-j30.png` — horizontal comparison of published contract values
-  while all alerts are pending, then a colorblind-friendly J+30 return chart
-  once evaluations are available.
+  value, contract-to-market-cap intensity, current provisional performance,
+  J+30 progress and the full alert pipeline;
+- `ted-alertes-j30.png` — colorblind-friendly current-return chart when market
+  prices are available, with published contract values as the offline fallback.
 
 When one or more evaluations become complete, the PNG and a compact table are
 sent to Telegram once. These returns are observations, not proof that the TED
@@ -366,7 +365,7 @@ Yahoo and were commented out of `deploy/whitelist.sql`; SMA Solar moved from
 | `python3 ted_scanner.py --dump 3` | print raw JSON of 3 notices (field discovery) |
 | `python3 ted_scanner.py --evaluate-alerts` | evaluate due J+30 alerts, rebuild and send the graph |
 | `python3 ted_scanner.py --evaluation-report` | rebuild the local HTML table and PNG without network calls |
-| `python3 ted_scanner.py --publish-report` | rebuild and publish the report to its Cloudflare Pages FQDN |
+| `python3 ted_scanner.py --publish-report` | refresh current provisional returns, rebuild and publish the report to its Cloudflare Pages FQDN |
 | `python3 ted_scanner.py --reset-financials` | clear cached cap/revenue so they refetch in EUR |
 | `python3 ted_scanner.py --selftest` | offline logic self-check |
 
