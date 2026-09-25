@@ -215,7 +215,7 @@ Outputs are written below `reports/` (gitignored):
 
 - `ted-alertes-j30.html` — dashboard with signal count, cumulative contract
   value, contract-to-market-cap intensity, current provisional performance,
-  J+30 progress and the full alert pipeline;
+  benchmark-relative performance, J+30 progress and the full alert pipeline;
 - `ted-alertes-j30.png` — colorblind-friendly current-return chart when market
   prices are available, with published contract values as the offline fallback.
 
