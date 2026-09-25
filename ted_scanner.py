@@ -55,6 +55,7 @@ from alert_evaluation import (
     selftest as evaluation_selftest,
     telegram_caption,
     unreported_complete,
+    with_current_returns,
 )
 from cloudflare_report import (
     PublishError,
@@ -865,12 +866,17 @@ def mark_processed(con, notice_id) -> None:
                 (notice_id,))
 
 
-def build_evaluation_report() -> tuple[str, str, list[dict]]:
-    """Regenerate the local HTML table and PNG graph without market/API calls."""
+def build_evaluation_report(*, live: bool = False) -> tuple[str, str, list[dict]]:
+    """Regenerate the HTML table and PNG graph, optionally with current prices."""
     with connect() as con:
         ensure_alert_schema(con)
         rows = load_alerts(con)
         con.commit()
+    if live and yf is not None:
+        rows = with_current_returns(
+            rows,
+            lambda ticker, start, end: load_history(yf, ticker, start, end),
+        )
     report, chart = render_reports(rows, Path(REPORT_DIR))
     log.info("J+30 report: %s (%d alert(s))", report, len(rows))
     return str(report), str(chart), rows
@@ -887,6 +893,11 @@ def run_alert_evaluations(*, send_report: bool = True) -> tuple[int, int]:
         )
         con.commit()
         rows = load_alerts(con)
+        if yf is not None:
+            rows = with_current_returns(
+                rows,
+                lambda ticker, start, end: load_history(yf, ticker, start, end),
+            )
         report, chart = render_reports(rows, Path(REPORT_DIR))
         pending_report = unreported_complete(con)
         sent = 0
@@ -1344,7 +1355,7 @@ def main(argv=None) -> int:
         build_evaluation_report()
         return 0
     if args.publish_report:
-        build_evaluation_report()
+        build_evaluation_report(live=True)
         try:
             url = publish_from_environment(
                 Path(REPORT_DIR), require_config=True, session=http_session()

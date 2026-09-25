@@ -268,6 +268,39 @@ def load_alerts(con: sqlite3.Connection) -> list[dict]:
     ]
 
 
+def with_current_returns(
+    rows: list[dict],
+    history_loader: HistoryLoader,
+    *,
+    now: dt.datetime | None = None,
+) -> list[dict]:
+    """Add transient mark-to-market returns to pending alerts."""
+    today = (now or utc_now()).date()
+    enriched = [dict(row) for row in rows]
+    for row in enriched:
+        if row.get("evaluation_status") != "pending" or not row.get("ticker"):
+            continue
+        alert_date = parse_utc(row["alerted_at"]).date()
+        try:
+            points = history_loader(
+                row["ticker"],
+                alert_date - dt.timedelta(days=7),
+                today + dt.timedelta(days=1),
+            )
+        except Exception:
+            continue
+        starts = [point for point in points if point[0] <= alert_date]
+        current = [point for point in points if point[0] <= today]
+        start = starts[-1] if starts else None
+        if start is None and row.get("start_price") and row.get("start_price_date"):
+            start = (dt.date.fromisoformat(row["start_price_date"]), float(row["start_price"]))
+        if not start or not current:
+            continue
+        row["current_return_pct"] = current[-1][1] / start[1] - 1.0
+        row["current_price_date"] = current[-1][0].isoformat()
+    return enriched
+
+
 def unreported_complete(con: sqlite3.Connection) -> list[dict]:
     ensure_schema(con)
     return [
@@ -299,22 +332,39 @@ def direction_label(return_pct: float | None) -> str:
 
 
 def render_chart(rows: list[dict], output: Path) -> None:
-    """Render J+30 returns, or contract values while every alert is pending."""
+    """Render current/final returns, or contract values when prices are unavailable."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FuncFormatter
 
-    complete = [row for row in rows if row.get("return_pct") is not None]
-    complete.sort(key=lambda row: float(row["return_pct"]))
-    height = max(4.0, 1.8 + 0.55 * max(1, len(complete)))
+    measured = [
+        row for row in rows
+        if row.get("return_pct") is not None or row.get("current_return_pct") is not None
+    ]
+    measured.sort(
+        key=lambda row: float(
+            row["return_pct"]
+            if row.get("return_pct") is not None
+            else row["current_return_pct"]
+        )
+    )
+    height = max(4.0, 1.8 + 0.55 * max(1, len(measured)))
     fig, ax = plt.subplots(figsize=(10, height))
-    if complete:
-        values = [float(row["return_pct"]) * 100 for row in complete]
+    if measured:
+        values = [
+            float(
+                row["return_pct"]
+                if row.get("return_pct") is not None
+                else row["current_return_pct"]
+            ) * 100
+            for row in measured
+        ]
         labels = [
-            f"{row.get('ticker') or 'n/a'} · {row['alerted_at'][:10]}"
-            for row in complete
+            f"{row.get('ticker') or 'n/a'} · "
+            f"{'J+30' if row.get('return_pct') is not None else 'en cours'}"
+            for row in measured
         ]
         colors = [
             "#0072B2" if value > STABLE_BAND_PCT
@@ -345,13 +395,14 @@ def render_chart(rows: list[dict], output: Path) -> None:
                 color=color,
                 fontweight="bold" if inside else "normal",
             )
-        average = sum(values) / len(values)
+        provisional = any(row.get("return_pct") is None for row in measured)
         ax.set_title(
-            f"Alertes TED : rendement moyen à J+30 {average:+.1f}%",
+            "Performance depuis l’alerte · provisoire jusqu’à J+30"
+            if provisional else "Performance finale à J+30",
             fontsize=14,
             fontweight="bold",
         )
-        ax.set_xlabel("Rendement ajusté du titre entre l’alerte et J+30")
+        ax.set_xlabel("Rendement ajusté depuis l’alerte")
         ax.xaxis.set_major_formatter(FuncFormatter(lambda value, _position: f"{value:.0f}%"))
     elif rows:
         pending = sorted(rows, key=lambda row: float(row["contract_value_eur"]))
@@ -472,8 +523,19 @@ def render_html(
     next_due_days = max(0, (next_due - today).days) if next_due else None
     body_rows = []
     for row in rows:
-        performance = row.get("return_pct")
+        final_performance = row.get("return_pct")
+        current_performance = row.get("current_return_pct")
+        performance = final_performance if final_performance is not None else current_performance
         performance_text = "—" if performance is None else f"{performance * 100:+.1f}%"
+        if final_performance is not None:
+            performance_note = "Finale à J+30"
+            reading = direction_label(final_performance)
+        elif current_performance is not None:
+            performance_note = f"Provisoire au {row['current_price_date']}"
+            reading = "En cours"
+        else:
+            performance_note = "Cours indisponible"
+            reading = "En attente"
         css_class = "pending"
         if performance is not None:
             css_class = "up" if performance * 100 > STABLE_BAND_PCT else (
@@ -497,8 +559,9 @@ def render_html(
             f"<span>Contrat / cap. : {ratio_text}</span></td>"
             f"<td><strong>{due_date.isoformat()}</strong><span>{html.escape(tracking_label)}</span>"
             f"<div class=progress aria-label=\"Progression {progress}%\"><i style=\"width:{progress}%\"></i></div></td>"
-            f"<td class=\"{css_class}\">{performance_text}</td>"
-            f"<td><span class=badge>{direction_label(performance)}</span></td>"
+            f"<td class=\"{css_class}\"><strong>{performance_text}</strong>"
+            f"<span>{html.escape(performance_note)}</span></td>"
+            f"<td><span class=badge>{reading}</span></td>"
             "</tr>"
         )
     if not body_rows:
@@ -509,7 +572,20 @@ def render_html(
         f"Plus gros signal : {html.escape(largest.get('ticker') or largest.get('company_name') or 'n/a')} "
         f"avec {_money(largest.get('contract_value_eur'))}."
     )
-    chart_title = "Performance boursière à J+30" if evaluated else "Taille des contrats en suivi"
+    has_provisional = any(row.get("current_return_pct") is not None for row in rows)
+    chart_title = (
+        "Performance actuelle des alertes" if has_provisional
+        else "Performance boursière à J+30" if evaluated
+        else "Taille des contrats en suivi"
+    )
+    chart_note = (
+        "Les valeurs « en cours » sont provisoires et actualisées au dernier cours disponible. "
+        "La mesure devient finale à J+30."
+        if has_provisional else
+        "Le graphique affiche les rendements ajustés définitifs à J+30."
+        if evaluated else
+        "Les cours sont momentanément indisponibles ; le graphique compare les montants publiés."
+    )
     document = f"""<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <meta name="robots" content="noindex,nofollow">
@@ -543,7 +619,7 @@ footer{{display:flex;justify-content:space-between;gap:18px;color:#71838e;font-s
 <div class=card><span class=eyebrow>Intensité maximale</span><strong>{max_ratio_value}</strong><span>Contrat / capitalisation à l’alerte</span></div>
 <div class=card><span class=eyebrow>Prochaine mesure</span><strong>{next_due_value}</strong><span>{next_due.isoformat() if next_due else 'Aucune échéance'}</span></div></section>
 <aside class=insight><strong>{largest_text}</strong><span>Les montants ne sont ni des revenus acquis ni une prévision de cours.</span></aside>
-<section class=panel><h2>{chart_title}</h2><p class=panel-note>Avant J+30, le graphique compare les montants publiés. Dès qu’une mesure arrive à maturité, il affiche les rendements ajustés.</p>
+<section class=panel><h2>{chart_title}</h2><p class=panel-note>{chart_note}</p>
 <img class=chart src="{html.escape(chart_name)}" alt="Graphique de synthèse des alertes TED"></section>
 <section class=panel><h2>Pipeline des alertes</h2><p class=panel-note>Progression calendaire jusqu’à J+30 et intensité du contrat par rapport à la capitalisation observée.</p>
 <div class=table-wrap><table><thead><tr><th>Société</th><th>Avis TED</th><th>Contrat</th><th>Suivi J+30</th><th>Performance</th><th>Lecture</th></tr></thead>
@@ -652,6 +728,24 @@ def selftest() -> None:
         assert "Taille des contrats en suivi" in pending_page
         assert "J+5 · encore 25 j" in pending_page
         assert "Contrat / cap.\u00a0: 20,0%" in pending_page
+
+        live_rows = with_current_returns(
+            pending_rows,
+            lambda _ticker, _start, _end: [
+                (dt.date(2026, 1, 2), 100.0),
+                (dt.date(2026, 1, 6), 108.0),
+            ],
+            now=dt.datetime(2026, 1, 7, 8, tzinfo=dt.timezone.utc),
+        )
+        assert abs(live_rows[0]["current_return_pct"] - 0.08) < 1e-9
+        live_report, _ = render_reports(
+            live_rows,
+            Path(raw_temp) / "live",
+            now=dt.datetime(2026, 1, 7, 8, tzinfo=dt.timezone.utc),
+        )
+        live_page = live_report.read_text(encoding="utf-8")
+        assert "+8.0%" in live_page and "Provisoire au 2026-01-06" in live_page
+        assert "Performance actuelle des alertes" in live_page
     print("alert_evaluation selftest: OK")
 
 
